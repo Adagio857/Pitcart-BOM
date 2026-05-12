@@ -18,9 +18,11 @@ const HEADERS = [
   'drawingUrl',
   'vendor',
   'location',
-  'notes'
+  'notes',
+  'itemKind',
+  'linkedBomId'
 ];
-const FOLDER_HEADERS = ['path', 'order'];
+const FOLDER_HEADERS = ['id', 'name', 'parentId', 'order'];
 
 function doGet(e) {
   const result = handleRequest_(e);
@@ -183,30 +185,46 @@ function readFolders_() {
   return sheet
     .getRange(2, 1, lastRow - 1, FOLDER_HEADERS.length)
     .getValues()
-    .map(row => String(row[0] || '').trim())
-    .filter(Boolean);
+    .map(row => {
+      const id = String(row[0] || '').trim();
+      const name = String(row[1] || '').trim();
+      const parentId = String(row[2] || '').trim();
+      if (id && name && !parentId && /^\d+$/.test(name)) return id;
+      return { id, name, parentId };
+    })
+    .filter(folder => typeof folder === 'string' ? folder : folder.id && folder.name);
 }
 
 function writeFolders_(folders) {
   const sheet = getFoldersSheet_();
   const lastRow = sheet.getLastRow();
   if (lastRow > 1) {
-    sheet.getRange(2, 1, lastRow - 1, 1).clearContent();
+    sheet.getRange(2, 1, lastRow - 1, FOLDER_HEADERS.length).clearContent();
   }
 
   const seen = {};
   const uniqueFolders = folders
-    .map(folder => String(folder || '').trim())
+    .map(folder => {
+      if (typeof folder === 'string') {
+        const path = String(folder || '').trim();
+        return { id: `legacy-${path.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`, name: path.split('/').pop().trim(), parentId: '' };
+      }
+      return {
+        id: String(folder.id || '').trim(),
+        name: String(folder.name || '').trim(),
+        parentId: String(folder.parentId || '').trim()
+      };
+    })
     .filter(folder => {
-      if (!folder || seen[folder]) return false;
-      seen[folder] = true;
+      if (!folder.id || !folder.name || seen[folder.id]) return false;
+      seen[folder.id] = true;
       return true;
     });
   if (!uniqueFolders.length) return;
 
   sheet
     .getRange(2, 1, uniqueFolders.length, FOLDER_HEADERS.length)
-    .setValues(uniqueFolders.map((folder, index) => [folder, index]));
+    .setValues(uniqueFolders.map((folder, index) => [folder.id, folder.name, folder.parentId, index]));
 }
 
 function json_(payload) {

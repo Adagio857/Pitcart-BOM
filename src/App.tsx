@@ -4,6 +4,7 @@ import {
   ExternalLink,
   FileJson,
   Filter,
+  Folder,
   PackagePlus,
   Plus,
   RefreshCw,
@@ -13,7 +14,7 @@ import {
   Upload,
   X
 } from "lucide-react";
-import { ChangeEvent, DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, DragEvent, FormEvent, MouseEvent, useEffect, useMemo, useState } from "react";
 
 type ProcessStatus = "Not Started" | "Queued" | "In Progress" | "Done" | "Blocked" | "Outsourced";
 
@@ -21,6 +22,8 @@ type ProcessStep = {
   name: string;
   status: ProcessStatus;
 };
+
+type ItemKind = "bom" | "production";
 
 type Part = {
   id: string;
@@ -37,6 +40,14 @@ type Part = {
   vendor: string;
   location: string;
   notes: string;
+  itemKind: ItemKind;
+  linkedBomId: string;
+};
+
+type FolderRecord = {
+  id: string;
+  name: string;
+  parentId: string;
 };
 
 type LegacyPart = Omit<Partial<Part>, "processes"> & {
@@ -49,6 +60,18 @@ type LegacyPart = Omit<Partial<Part>, "processes"> & {
 type PartForm = Omit<Part, "id" | "quantity" | "unitPrice"> & {
   quantity: string;
   unitPrice: string;
+};
+
+type FolderDropPosition = "before" | "after" | "inside";
+
+type FolderDropIndicator = {
+  path: string;
+  position: FolderDropPosition;
+};
+
+type PartDropIndicator = {
+  id: string;
+  position: "before" | "after";
 };
 
 const SHEET_WEB_APP_URL_KEY = "parts-tracker.sheetWebAppUrl";
@@ -80,7 +103,9 @@ const emptyForm: PartForm = {
   drawingUrl: "",
   vendor: "",
   location: "",
-  notes: ""
+  notes: "",
+  itemKind: "bom",
+  linkedBomId: ""
 };
 
 const csvHeaders = [
@@ -97,7 +122,9 @@ const csvHeaders = [
   "drawingUrl",
   "vendor",
   "location",
-  "notes"
+  "notes",
+  "itemKind",
+  "linkedBomId"
 ] as const;
 
 function normalizePart(part: LegacyPart): Part {
@@ -108,13 +135,16 @@ function normalizePart(part: LegacyPart): Part {
       : Array.isArray(part.processes) && part.processes.length > 0
         ? part.processes
         : [{ name: part.process || "Unassigned", status: part.status || "Not Started" }];
+  const itemKind = part.itemKind === "production" || part.itemKind === "bom"
+    ? part.itemKind
+    : "bom";
 
   return {
     id: part.id || crypto.randomUUID(),
     name: part.name || "",
     partNumber: part.partNumber || "",
     originalPartNumber: part.originalPartNumber || part.partNumber || "",
-    folder: part.folder === "Unfiled" ? "" : normalizeFolderPath(part.folder || ""),
+    folder: part.folder === "Unfiled" ? "" : String(part.folder || "").trim(),
     quantity: Number(part.quantity) || 0,
     unitPrice: Number(part.unitPrice) || 0,
     material: legacyMaterial || "",
@@ -126,23 +156,27 @@ function normalizePart(part: LegacyPart): Part {
     drawingUrl: part.drawingUrl || "",
     vendor: part.vendor || "",
     location: part.location || "",
-    notes: part.notes || ""
+    notes: part.notes || "",
+    itemKind,
+    linkedBomId: part.linkedBomId || ""
   };
 }
 
 type SheetResult = {
   ok: boolean;
   parts?: LegacyPart[];
-  folders?: string[];
+  folders?: LegacyFolder[];
   error?: string;
 };
 
 type WorkspaceCache = {
   parts: LegacyPart[];
-  folders: string[];
+  folders: LegacyFolder[];
   dirty: boolean;
   updatedAt: string;
 };
+
+type LegacyFolder = string | Partial<FolderRecord>;
 
 function buildScriptUrl(webAppUrl: string, params: Record<string, string>) {
   const url = new URL(webAppUrl);
@@ -150,21 +184,99 @@ function buildScriptUrl(webAppUrl: string, params: Record<string, string>) {
   return url.toString();
 }
 
-function loadWorkspaceCache(): { parts: Part[]; folders: string[]; dirty: boolean } {
+function makeFolderId() {
+  return `folder-${crypto.randomUUID()}`;
+}
+
+function legacyFolderId(path: string) {
+  return `legacy-${normalizeFolderPath(path).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+}
+
+function normalizeFolders(rawFolders: LegacyFolder[], rawParts: LegacyPart[] = []) {
+  const records: FolderRecord[] = [];
+  const folderById = new Map<string, FolderRecord>();
+  const idByPath = new Map<string, string>();
+
+  function addRecord(record: FolderRecord) {
+    if (!record.id || folderById.has(record.id)) return record.id;
+    const normalizedRecord = {
+      id: record.id,
+      name: record.name.trim() || "Untitled folder",
+      parentId: record.parentId || ""
+    };
+    folderById.set(normalizedRecord.id, normalizedRecord);
+    records.push(normalizedRecord);
+    return normalizedRecord.id;
+  }
+
+  function ensurePath(path: string) {
+    const pieces = splitFolderPath(path);
+    let parentId = "";
+    let currentPath = "";
+
+    pieces.forEach((piece) => {
+      currentPath = currentPath ? `${currentPath} / ${piece}` : piece;
+      const existingId = idByPath.get(currentPath);
+      if (existingId) {
+        parentId = existingId;
+        return;
+      }
+
+      const id = legacyFolderId(currentPath);
+      parentId = addRecord({ id, name: piece, parentId });
+      idByPath.set(currentPath, id);
+    });
+
+    return parentId;
+  }
+
+  rawFolders.forEach((folder) => {
+    if (typeof folder === "string") {
+      ensurePath(folder);
+      return;
+    }
+
+    const id = String(folder.id || "").trim();
+    const name = String(folder.name || "").trim();
+    if (id && name) addRecord({ id, name, parentId: String(folder.parentId || "").trim() });
+  });
+
+  rawParts.forEach((part) => {
+    const folder = String(part.folder || "").trim();
+    if (folder && folder !== "Unfiled" && !folderById.has(folder)) ensurePath(folder);
+  });
+
+  records.forEach((folder) => {
+    const path = getFolderDisplayPath(folder.id, records);
+    if (path) idByPath.set(path, folder.id);
+  });
+
+  return { folders: records, idByPath, folderIds: new Set(records.map((folder) => folder.id)) };
+}
+
+function migratePartFolder(part: Part, idByPath: Map<string, string>, folderIds: Set<string>) {
+  if (!part.folder) return part;
+  if (folderIds.has(part.folder)) return part;
+  const normalizedPath = normalizeFolderPath(part.folder);
+  return { ...part, folder: idByPath.get(normalizedPath) || "" };
+}
+
+function loadWorkspaceCache(): { parts: Part[]; folders: FolderRecord[]; dirty: boolean } {
   const saved = localStorage.getItem(WORKSPACE_CACHE_KEY);
   if (!saved) return { parts: [], folders: [], dirty: false };
 
   try {
     const cache = JSON.parse(saved) as WorkspaceCache;
-    const parts = Array.isArray(cache.parts) ? cache.parts.map(normalizePart) : [];
-    const folders = Array.isArray(cache.folders) ? cache.folders.filter(Boolean) : [];
+    const rawParts = Array.isArray(cache.parts) ? cache.parts : [];
+    const { folders, idByPath, folderIds } = normalizeFolders(Array.isArray(cache.folders) ? cache.folders : [], rawParts);
+    const parts = rawParts.map(normalizePart).map((part) => migratePartFolder(part, idByPath, folderIds));
     return { parts, folders, dirty: Boolean(cache.dirty) };
   } catch {
     return { parts: [], folders: [], dirty: false };
   }
 }
 
-function saveWorkspaceCache(parts: Part[], folders: string[], dirty: boolean) {
+function saveWorkspaceCache(parts: Part[], folders: FolderRecord[], dirty: boolean) {
   const cache: WorkspaceCache = {
     parts,
     folders,
@@ -174,7 +286,7 @@ function saveWorkspaceCache(parts: Part[], folders: string[], dirty: boolean) {
   localStorage.setItem(WORKSPACE_CACHE_KEY, JSON.stringify(cache));
 }
 
-function readWorkspaceFromSheet(webAppUrl: string): Promise<{ parts: Part[]; folders: string[] }> {
+function readWorkspaceFromSheet(webAppUrl: string): Promise<{ parts: Part[]; folders: FolderRecord[] }> {
   return new Promise((resolve, reject) => {
     const callbackName = `partsTracker_${crypto.randomUUID().replace(/-/g, "")}`;
     const script = document.createElement("script");
@@ -195,9 +307,11 @@ function readWorkspaceFromSheet(webAppUrl: string): Promise<{ parts: Part[]; fol
         reject(new Error(result.error || "Google Sheet returned an error."));
         return;
       }
+      const rawParts = result.parts || [];
+      const { folders, idByPath, folderIds } = normalizeFolders(result.folders || [], rawParts);
       resolve({
-        parts: (result.parts || []).map(normalizePart),
-        folders: (result.folders || []).map((folder) => folder.trim()).filter(Boolean)
+        parts: rawParts.map(normalizePart).map((part) => migratePartFolder(part, idByPath, folderIds)),
+        folders
       });
     };
 
@@ -210,7 +324,7 @@ function readWorkspaceFromSheet(webAppUrl: string): Promise<{ parts: Part[]; fol
   });
 }
 
-async function writeWorkspaceToSheet(webAppUrl: string, parts: Part[], folders: string[]) {
+async function writeWorkspaceToSheet(webAppUrl: string, parts: Part[], folders: FolderRecord[]) {
   const result = await callScriptJsonp(webAppUrl, {
     action: "replaceAll",
     payload: JSON.stringify({ parts, folders })
@@ -356,8 +470,8 @@ function nextAvailablePartNumber(usedPartNumbers: Set<string>) {
 function reconcileWorkspaceForSync(
   localParts: Part[],
   remoteParts: Part[],
-  localFolders: string[],
-  remoteFolders: string[]
+  localFolders: FolderRecord[],
+  remoteFolders: FolderRecord[]
 ) {
   const remoteById = new Map(remoteParts.map((part) => [part.id, part]));
   const localById = new Map(localParts.map((part) => [part.id, part]));
@@ -384,11 +498,10 @@ function reconcileWorkspaceForSync(
     mergedParts.push(nextPart);
   });
 
-  const mergedFolders = uniqueInOrder([
+  const mergedFolders = uniqueFoldersById([
     ...remoteFolders,
     ...localFolders,
-    ...(mergedParts.map((part) => part.folder).filter(Boolean) as string[])
-  ]);
+  ]).filter((folder) => mergedParts.some((part) => part.folder === folder.id) || localFolders.some((local) => local.id === folder.id) || remoteFolders.some((remote) => remote.id === folder.id));
 
   return { parts: mergedParts, folders: mergedFolders, renumberedCount };
 }
@@ -407,39 +520,45 @@ function uniqueInOrder(values: string[]) {
   return nextValues;
 }
 
+function uniqueFoldersById(values: FolderRecord[]) {
+  const seen = new Set<string>();
+  return values.filter((folder) => {
+    if (!folder.id || seen.has(folder.id)) return false;
+    seen.add(folder.id);
+    return true;
+  });
+}
+
 type FolderNode = {
-  path: string;
+  id: string;
   name: string;
+  parentId: string;
+  path: string;
   count: number;
   totalCount: number;
   children: FolderNode[];
 };
 
-function buildFolderTree(folders: string[], parts: Part[]) {
+function buildFolderTree(folders: FolderRecord[], parts: Part[]) {
+  const nodes = new Map<string, FolderNode>();
   const root: FolderNode[] = [];
-  const countForPath = (path: string) => parts.filter((part) => (part.folder || "") === path).length;
 
   folders.forEach((folder) => {
-    const pieces = splitFolderPath(folder);
-    let currentLevel = root;
-    let currentPath = "";
-
-    pieces.forEach((piece) => {
-      currentPath = currentPath ? `${currentPath} / ${piece}` : piece;
-      let node = currentLevel.find((candidate) => candidate.name === piece);
-      if (!node) {
-        node = {
-          path: currentPath,
-          name: piece,
-          count: countForPath(currentPath),
-          totalCount: 0,
-          children: []
-        };
-        currentLevel.push(node);
-      }
-
-      currentLevel = node.children;
+    nodes.set(folder.id, {
+      ...folder,
+      path: getFolderDisplayPath(folder.id, folders),
+      count: parts.filter((part) => part.folder === folder.id).length,
+      totalCount: 0,
+      children: []
     });
+  });
+
+  folders.forEach((folder) => {
+    const node = nodes.get(folder.id);
+    if (!node) return;
+    const parent = folder.parentId ? nodes.get(folder.parentId) : null;
+    if (parent) parent.children.push(node);
+    else root.push(node);
   });
 
   function finalize(nodes: FolderNode[]): FolderNode[] {
@@ -464,34 +583,51 @@ function normalizeFolderPath(path: string) {
   return splitFolderPath(path).join(" / ");
 }
 
-function getParentFolder(path: string) {
-  const pieces = splitFolderPath(path);
-  return pieces.length <= 1 ? "All" : pieces.slice(0, -1).join(" / ");
+function getParentFolder(folderId: string, folders: FolderRecord[]) {
+  const folder = folders.find((candidate) => candidate.id === folderId);
+  return folder?.parentId || "All";
 }
 
-function getDirectChildFolders(currentFolder: string, folders: string[]) {
-  const children = new Map<string, string>();
-
-  folders.forEach((folder) => {
-    const pieces = splitFolderPath(folder);
-    if (currentFolder === "All") {
-      if (pieces[0]) children.set(pieces[0], pieces[0]);
-      return;
-    }
-
-    const currentPieces = splitFolderPath(currentFolder);
-    const isChild = pieces.length > currentPieces.length && currentPieces.every((piece, index) => pieces[index] === piece);
-    if (isChild) {
-      const childPath = pieces.slice(0, currentPieces.length + 1).join(" / ");
-      children.set(childPath, childPath);
-    }
-  });
-
-  return Array.from(children.values()).sort((a, b) => folders.indexOf(a) - folders.indexOf(b));
+function getDirectChildFolders(currentFolder: string, folders: FolderRecord[]) {
+  const parentId = currentFolder === "All" ? "" : currentFolder;
+  return folders.filter((folder) => folder.parentId === parentId);
 }
 
-function getFolderGroup(path: string, folders: string[]) {
-  return folders.filter((folder) => folder === path || folder.startsWith(`${path} / `));
+function getFolderDescendantIds(folderId: string, folders: FolderRecord[]) {
+  const descendants = new Set<string>();
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+    folders.forEach((folder) => {
+      if (!descendants.has(folder.id) && (folder.parentId === folderId || descendants.has(folder.parentId))) {
+        descendants.add(folder.id);
+        changed = true;
+      }
+    });
+  }
+
+  return descendants;
+}
+
+function getFolderGroup(folderId: string, folders: FolderRecord[]) {
+  const descendants = getFolderDescendantIds(folderId, folders);
+  return folders.filter((folder) => folder.id === folderId || descendants.has(folder.id));
+}
+
+function getFolderDisplayPath(folderId: string, folders: FolderRecord[]) {
+  const byId = new Map(folders.map((folder) => [folder.id, folder]));
+  const pieces: string[] = [];
+  let current = byId.get(folderId);
+  const seen = new Set<string>();
+
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    pieces.unshift(current.name);
+    current = current.parentId ? byId.get(current.parentId) : undefined;
+  }
+
+  return pieces.join(" / ");
 }
 
 function partToForm(part: Part): PartForm {
@@ -508,7 +644,7 @@ function formToPart(form: PartForm, id: string = crypto.randomUUID()): Part {
     id,
     partNumber: form.partNumber.trim(),
     originalPartNumber: form.originalPartNumber.trim(),
-    folder: normalizeFolderPath(form.folder),
+    folder: form.folder,
     quantity: Number(form.quantity) || 0,
     unitPrice: Number(form.unitPrice) || 0,
     processes: form.processes
@@ -520,7 +656,7 @@ function formToPart(form: PartForm, id: string = crypto.randomUUID()): Part {
 export function App() {
   const cachedWorkspace = useMemo(loadWorkspaceCache, []);
   const [parts, setParts] = useState<Part[]>(cachedWorkspace.parts);
-  const [folderPaths, setFolderPaths] = useState<string[]>(cachedWorkspace.folders);
+  const [folderRecords, setFolderRecords] = useState<FolderRecord[]>(cachedWorkspace.folders);
   const [form, setForm] = useState<PartForm>(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [sheetWebAppUrl, setSheetWebAppUrl] = useState(
@@ -541,13 +677,20 @@ export function App() {
       : "Connect the Google Apps Script web app to load parts."
   );
   const [query, setQuery] = useState("");
+  const [activeSection, setActiveSection] = useState<ItemKind>("bom");
   const [folderFilter, setFolderFilter] = useState("All");
   const [statusFilter, setStatusFilter] = useState<"All" | ProcessStatus>("All");
   const [processFilter, setProcessFilter] = useState("All");
   const [processDraft, setProcessDraft] = useState<ProcessStep>({ name: "", status: "Not Started" });
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set(["Subsystem", "Material"]));
+  const [draggingFolder, setDraggingFolder] = useState<string | null>(null);
+  const [draggingPartId, setDraggingPartId] = useState<string | null>(null);
+  const [dragPosition, setDragPosition] = useState({ x: 0, y: 0 });
+  const [folderDropIndicator, setFolderDropIndicator] = useState<FolderDropIndicator | null>(null);
+  const [partDropIndicator, setPartDropIndicator] = useState<PartDropIndicator | null>(null);
   const [previewPartId, setPreviewPartId] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [lastSelectedPartId, setLastSelectedPartId] = useState<string | null>(null);
 
   useEffect(() => {
     if (sheetWebAppUrl) {
@@ -563,7 +706,7 @@ export function App() {
     }, SYNC_INTERVAL_MS);
 
     return () => window.clearTimeout(timer);
-  }, [folderPaths, hasPendingSync, isSheetLoading, parts, sheetWebAppUrl]);
+  }, [folderRecords, hasPendingSync, isSheetLoading, parts, sheetWebAppUrl]);
 
   async function refreshFromSheet(url = sheetWebAppUrl) {
     if (!url) {
@@ -577,12 +720,9 @@ export function App() {
     try {
       const workspace = await readWorkspaceFromSheet(url);
       const nextParts = workspace.parts;
-      const nextFolders = uniqueInOrder([
-        ...workspace.folders.filter((folder) => folder !== "Unfiled"),
-        ...(nextParts.map((part) => part.folder).filter(Boolean) as string[])
-      ]);
+      const nextFolders = workspace.folders;
       setParts(nextParts);
-      setFolderPaths(nextFolders);
+      setFolderRecords(nextFolders);
       saveWorkspaceCache(nextParts, nextFolders, false);
       setHasPendingSync(false);
       setSelected(new Set());
@@ -595,9 +735,9 @@ export function App() {
     }
   }
 
-  function persist(nextParts: Part[], nextFolders = folderPaths) {
+  function persist(nextParts: Part[], nextFolders = folderRecords) {
     setParts(nextParts);
-    setFolderPaths(nextFolders);
+    setFolderRecords(nextFolders);
     setHasPendingSync(true);
     saveWorkspaceCache(nextParts, nextFolders, true);
     setSheetMessage(sheetWebAppUrl ? "Saved locally. Google Sheet sync pending." : "Saved locally. Connect the Sheet to sync.");
@@ -614,12 +754,12 @@ export function App() {
     setSheetMessage("Checking latest Sheet data before syncing...");
     try {
       const remoteWorkspace = await readWorkspaceFromSheet(sheetWebAppUrl);
-      const reconciled = reconcileWorkspaceForSync(parts, remoteWorkspace.parts, folderPaths, remoteWorkspace.folders);
+      const reconciled = reconcileWorkspaceForSync(parts, remoteWorkspace.parts, folderRecords, remoteWorkspace.folders);
 
       setSheetMessage("Syncing local changes to Google Sheet...");
       await writeWorkspaceToSheet(sheetWebAppUrl, reconciled.parts, reconciled.folders);
       setParts(reconciled.parts);
-      setFolderPaths(reconciled.folders);
+      setFolderRecords(reconciled.folders);
       saveWorkspaceCache(reconciled.parts, reconciled.folders, false);
       setHasPendingSync(false);
       setSheetMessage(
@@ -654,48 +794,69 @@ export function App() {
   const processes = useMemo(
     () => [
       "All",
-      ...Array.from(new Set(parts.flatMap((part) => part.processes.map((process) => process.name)).filter(Boolean))).sort()
+      ...Array.from(
+        new Set(
+          parts
+            .filter((part) => part.itemKind === "production")
+            .flatMap((part) => part.processes.map((process) => process.name))
+            .filter(Boolean)
+        )
+      ).sort()
     ],
     [parts]
   );
+  const bomItems = useMemo(() => parts.filter((part) => part.itemKind === "bom"), [parts]);
+  const productionItems = useMemo(() => parts.filter((part) => part.itemKind === "production"), [parts]);
+  const sectionItems = activeSection === "bom" ? bomItems : productionItems;
 
-  const folders = useMemo(
-    () => uniqueInOrder([...folderPaths, ...(parts.map((part) => part.folder).filter(Boolean) as string[])]),
-    [folderPaths, parts]
-  );
-  const folderTree = useMemo(() => buildFolderTree(folders, parts), [folders, parts]);
+  const folders = useMemo(() => uniqueFoldersById(folderRecords), [folderRecords]);
+  const folderTree = useMemo(() => buildFolderTree(folders, sectionItems), [folders, sectionItems]);
   const childFolders = useMemo(() => getDirectChildFolders(folderFilter, folders), [folderFilter, folders]);
   const breadcrumbFolders = useMemo(() => {
     if (folderFilter === "All") return [];
-    const pieces = splitFolderPath(folderFilter);
-    return pieces.map((piece, index) => ({
-      name: piece,
-      path: pieces.slice(0, index + 1).join(" / ")
-    }));
-  }, [folderFilter]);
+    const byId = new Map(folders.map((folder) => [folder.id, folder]));
+    const breadcrumbs: { name: string; id: string }[] = [];
+    let current = byId.get(folderFilter);
+    const seen = new Set<string>();
+    while (current && !seen.has(current.id)) {
+      seen.add(current.id);
+      breadcrumbs.unshift({ name: current.name, id: current.id });
+      current = current.parentId ? byId.get(current.parentId) : undefined;
+    }
+    return breadcrumbs;
+  }, [folderFilter, folders]);
 
   useEffect(() => {
-    if (folderFilter !== "All" && !folders.includes(folderFilter)) {
+    if (folderFilter !== "All" && !folders.some((folder) => folder.id === folderFilter)) {
       setFolderFilter("All");
     }
   }, [folderFilter, folders]);
+
+  useEffect(() => {
+    setSelected(new Set());
+    setLastSelectedPartId(null);
+    setPreviewPartId(null);
+  }, [activeSection]);
 
   const filteredParts = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
 
     return parts.filter((part) => {
+      if (part.itemKind !== activeSection) return false;
       const partFolder = part.folder || "";
+      const descendantIds = folderFilter === "All" ? new Set<string>() : getFolderDescendantIds(folderFilter, folders);
       const folderMatches = normalizedQuery
-        ? folderFilter === "All" || partFolder === folderFilter || partFolder.startsWith(`${folderFilter} / `)
+        ? folderFilter === "All" || partFolder === folderFilter || descendantIds.has(partFolder)
         : folderFilter === "All"
           ? partFolder === ""
           : partFolder === folderFilter;
       const statusMatches =
-        statusFilter === "All" || part.processes.some((process) => process.status === statusFilter);
+        activeSection === "bom" || statusFilter === "All" || part.processes.some((process) => process.status === statusFilter);
       const processMatches =
-        processFilter === "All" || part.processes.some((process) => process.name === processFilter);
+        activeSection === "bom" || processFilter === "All" || part.processes.some((process) => process.name === processFilter);
       const searchable = {
         ...part,
+        folder: part.folder ? getFolderDisplayPath(part.folder, folders) : "Root",
         processes: serializeProcesses(part.processes)
       };
       const queryMatches =
@@ -704,11 +865,11 @@ export function App() {
 
       return folderMatches && statusMatches && processMatches && queryMatches;
     });
-  }, [folderFilter, parts, processFilter, query, statusFilter]);
+  }, [activeSection, folderFilter, folders, parts, processFilter, query, statusFilter]);
 
-  const totalValue = parts.reduce((sum, part) => sum + part.quantity * part.unitPrice, 0);
-  const lowStockCount = parts.filter((part) => part.quantity <= 2).length;
-  const blockedCount = parts.filter((part) => part.processes.some((process) => process.status === "Blocked")).length;
+  const totalValue = bomItems.reduce((sum, part) => sum + part.quantity * part.unitPrice, 0);
+  const lowStockCount = bomItems.filter((part) => part.quantity <= 2).length;
+  const blockedCount = productionItems.filter((part) => part.processes.some((process) => process.status === "Blocked")).length;
   const previewPart = parts.find((part) => part.id === previewPartId) ?? null;
   const nextPartNumber = useMemo(() => generateNextPartNumber(parts), [parts]);
   const visiblePartNumber = form.partNumber || (!editingId ? nextPartNumber : "");
@@ -745,218 +906,286 @@ export function App() {
     const folderName = window.prompt("Folder name");
     const draft = normalizeFolderPath(folderName || "");
     if (!draft) return;
-    const parentPath = parent === "All" ? "" : normalizeFolderPath(parent);
-    const folder = draft.includes("/") || !parentPath ? draft : `${parentPath} / ${draft}`;
-    if (folders.includes(folder)) {
-      setSheetMessage(`Folder "${folder}" already exists.`);
-      return;
-    }
-    const nextFolders = uniqueInOrder([...folders, folder]);
-    setFolderFilter(folder);
+    const parentId = parent === "All" ? "" : parent;
+    let activeParentId = parentId;
+    const newFolders = splitFolderPath(draft).map((name) => {
+      const folder = { id: makeFolderId(), name, parentId: activeParentId };
+      activeParentId = folder.id;
+      return folder;
+    });
+    if (newFolders.length === 0) return;
+    const nextFolders = [...folders, ...newFolders];
+    const createdFolderId = newFolders[newFolders.length - 1].id;
+    setFolderFilter(createdFolderId);
     setExpandedFolders((current) => {
       const next = new Set(current);
-      const pieces = splitFolderPath(folder);
-      pieces.slice(0, -1).reduce((path, piece) => {
-        const nextPath = path ? `${path} / ${piece}` : piece;
-        next.add(nextPath);
-        return nextPath;
-      }, "");
+      if (parentId) next.add(parentId);
+      newFolders.slice(0, -1).forEach((folder) => next.add(folder.id));
       return next;
     });
     persist(parts, nextFolders);
   }
 
-  function toggleFolder(path: string) {
+  function toggleFolder(folderId: string) {
     setExpandedFolders((current) => {
       const next = new Set(current);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
+      if (next.has(folderId)) next.delete(folderId);
+      else next.add(folderId);
       return next;
     });
   }
 
-  async function removeFolder(path: string) {
-    const parent = getParentFolder(path);
-    const parentPath = parent === "All" ? "" : parent;
-    const affectedParts = parts.filter((part) => {
-      const folder = part.folder || "";
-      return folder === path || folder.startsWith(`${path} / `);
-    });
+  async function removeFolder(folderId: string) {
+    const folder = folders.find((candidate) => candidate.id === folderId);
+    if (!folder) return;
+    const parent = getParentFolder(folderId, folders);
+    const parentId = parent === "All" ? "" : parent;
+    const affectedFolderIds = getFolderDescendantIds(folderId, folders);
+    affectedFolderIds.add(folderId);
+    const affectedParts = parts.filter((part) => affectedFolderIds.has(part.folder));
 
     const confirmed = window.confirm(
-      `Delete "${path}" and its nested folders? ${affectedParts.length} affected part(s) will move to the parent folder.`
+      `Delete "${folder.name}" and its nested folders? ${affectedParts.length} affected part(s) will move to the parent folder.`
     );
     if (!confirmed) return;
 
-    const nextParts = parts.map((part) => {
-      const folder = part.folder || "";
-      if (folder === path || folder.startsWith(`${path} / `)) {
-        return { ...part, folder: parentPath };
-      }
-      return part;
-    });
-    const nextFolders = folders.filter((folder) => folder !== path && !folder.startsWith(`${path} / `));
+    const nextParts = parts.map((part) => (affectedFolderIds.has(part.folder) ? { ...part, folder: parentId } : part));
+    const nextFolders = folders.filter((candidate) => !affectedFolderIds.has(candidate.id));
 
     const saved = persist(nextParts, nextFolders);
-    if (saved && (folderFilter === path || folderFilter.startsWith(`${path} / `))) {
+    if (saved && affectedFolderIds.has(folderFilter)) {
       setFolderFilter(parent);
     }
   }
 
-  function renameFolderPath(folder: string, targetParent: string) {
-    const pieces = splitFolderPath(folder);
-    const name = pieces[pieces.length - 1] || folder;
-    const parentPath = targetParent === "All" ? "" : normalizeFolderPath(targetParent);
-    return !parentPath ? name : `${parentPath} / ${name}`;
-  }
+  async function moveFolder(folderId: string, targetParent: string) {
+    const parentId = targetParent === "All" ? "" : targetParent;
+    const descendantIds = getFolderDescendantIds(folderId, folders);
+    if (folderId === parentId || descendantIds.has(parentId)) return;
 
-  async function moveFolder(folder: string, targetParent: string) {
-    const sourceFolder = normalizeFolderPath(folder);
-    const parentPath = targetParent === "All" ? "" : normalizeFolderPath(targetParent);
-    if (sourceFolder === parentPath || parentPath.startsWith(`${sourceFolder} / `)) return;
-
-    const movingGroup = getFolderGroup(sourceFolder, folders);
-    const movingSet = new Set(movingGroup);
-    const nextBasePath = renameFolderPath(sourceFolder, parentPath);
-    const hasCollision = folders.some(
-      (existing) => !movingSet.has(existing) && (existing === nextBasePath || existing.startsWith(`${nextBasePath} / `))
-    );
-    if (hasCollision) {
-      setSheetMessage(`A folder named "${nextBasePath}" already exists there.`);
-      return;
-    }
-    const rewrite = (path: string) => {
-      const normalized = normalizeFolderPath(path);
-      if (normalized === sourceFolder) return nextBasePath;
-      if (normalized.startsWith(`${sourceFolder} / `)) return `${nextBasePath}${normalized.slice(sourceFolder.length)}`;
-      return normalized;
-    };
-    const nextParts = parts.map((part) => ({ ...part, folder: rewrite(part.folder || "") }));
-    const rewrittenGroup = uniqueInOrder(movingGroup.map(rewrite));
-    const foldersWithoutMoved = folders.filter((path) => !movingSet.has(path));
-    const parentGroup = parentPath ? getFolderGroup(parentPath, foldersWithoutMoved) : [];
-    const parentIndex = parentPath ? foldersWithoutMoved.indexOf(parentPath) : -1;
-    const insertIndex = parentPath && parentIndex >= 0 ? parentIndex + parentGroup.length : foldersWithoutMoved.length;
-    const nextFolders = uniqueInOrder([
+    const movingGroup = getFolderGroup(folderId, folders);
+    const movingSet = new Set(movingGroup.map((folder) => folder.id));
+    const foldersWithoutMoved = folders.filter((folder) => !movingSet.has(folder.id));
+    const parentGroup = parentId ? getFolderGroup(parentId, foldersWithoutMoved) : [];
+    const parentIndex = parentId ? foldersWithoutMoved.findIndex((folder) => folder.id === parentId) : -1;
+    const insertIndex = parentId && parentIndex >= 0 ? parentIndex + parentGroup.length : foldersWithoutMoved.length;
+    const movedGroup = movingGroup.map((folder, index) => (index === 0 ? { ...folder, parentId } : folder));
+    const nextFolders = uniqueFoldersById([
       ...foldersWithoutMoved.slice(0, insertIndex),
-      ...rewrittenGroup,
+      ...movedGroup,
       ...foldersWithoutMoved.slice(insertIndex)
     ]);
-    persist(nextParts, nextFolders);
-    setFolderFilter((current) => rewrite(current));
+    persist(parts, nextFolders);
     setExpandedFolders((current) => {
-      const next = new Set(Array.from(current).map(rewrite));
-      if (parentPath) next.add(parentPath);
-      next.add(nextBasePath);
+      const next = new Set(current);
+      if (parentId) next.add(parentId);
+      next.add(folderId);
       return next;
     });
   }
 
-  async function movePartToFolder(partId: string, folder: string) {
-    const nextFolder = normalizeFolderPath(folder);
-    const nextParts = parts.map((part) => (part.id === partId ? { ...part, folder: nextFolder } : part));
+  async function moveFolderToPosition(folderId: string, targetFolderId: string, position: FolderDropPosition) {
+    if (position === "inside") {
+      await moveFolder(folderId, targetFolderId);
+      return;
+    }
+
+    const targetFolder = folders.find((folder) => folder.id === targetFolderId);
+    if (!targetFolder) return;
+    const descendantIds = getFolderDescendantIds(folderId, folders);
+    if (folderId === targetFolderId || descendantIds.has(targetFolderId)) return;
+
+    const movingGroup = getFolderGroup(folderId, folders);
+    const movingSet = new Set(movingGroup.map((folder) => folder.id));
+    const foldersWithoutMoved = folders.filter((folder) => !movingSet.has(folder.id));
+    const targetGroup = getFolderGroup(targetFolderId, foldersWithoutMoved);
+    const targetIndex = foldersWithoutMoved.findIndex((folder) => folder.id === targetFolderId);
+    const insertIndex = position === "before" ? targetIndex : targetIndex + targetGroup.length;
+    if (targetIndex < 0) return;
+
+    const movedGroup = movingGroup.map((folder, index) =>
+      index === 0 ? { ...folder, parentId: targetFolder.parentId } : folder
+    );
+    const nextFolders = uniqueFoldersById([
+      ...foldersWithoutMoved.slice(0, insertIndex),
+      ...movedGroup,
+      ...foldersWithoutMoved.slice(insertIndex)
+    ]);
+    persist(parts, nextFolders);
+  }
+
+  async function movePartToFolder(partId: string, folderId: string) {
+    const nextParts = parts.map((part) => (part.id === partId ? { ...part, folder: folderId } : part));
     persist(nextParts, folders);
   }
 
-  async function renameFolder(path: string) {
-    const pieces = splitFolderPath(path);
-    const currentName = pieces[pieces.length - 1] || path;
-    const nextName = normalizeFolderPath(window.prompt("Rename folder", currentName) || "");
-    if (!nextName || nextName === currentName) return;
-
-    const parent = getParentFolder(path);
-    const nextBasePath = parent === "All" ? nextName : `${parent} / ${nextName}`;
-    const movingGroup = getFolderGroup(path, folders);
-    const movingSet = new Set(movingGroup);
-    const hasCollision = folders.some(
-      (folder) => !movingSet.has(folder) && (folder === nextBasePath || folder.startsWith(`${nextBasePath} / `))
-    );
-    if (hasCollision) {
-      setSheetMessage(`A folder named "${nextBasePath}" already exists.`);
-      return;
-    }
-    const rewrite = (folder: string) => {
-      if (folder === path) return nextBasePath;
-      if (folder.startsWith(`${path} / `)) return `${nextBasePath}${folder.slice(path.length)}`;
-      return folder;
-    };
-
-    const nextParts = parts.map((part) => ({ ...part, folder: rewrite(part.folder || "") }));
-    const nextFolders = uniqueInOrder(folders.map(rewrite));
-    const saved = persist(nextParts, nextFolders);
-    if (saved) setFolderFilter((current) => rewrite(current));
+  async function movePartsToFolder(partIds: string[], folderId: string) {
+    const movingIds = new Set(partIds);
+    const nextParts = parts.map((part) => (movingIds.has(part.id) ? { ...part, folder: folderId } : part));
+    persist(nextParts, folders);
   }
 
-  async function unpackFolder(path: string) {
-    const parent = getParentFolder(path);
-    const parentPath = parent === "All" ? "" : parent;
-    const rewrite = (folder: string) => {
-      if (folder === path) return parentPath;
-      if (folder.startsWith(`${path} / `)) {
-        const suffix = folder.slice(path.length + 3);
-        return parentPath ? `${parentPath} / ${suffix}` : suffix;
-      }
-      return folder;
-    };
+  function movePartToPosition(partId: string, targetPartId: string, position: "before" | "after") {
+    movePartsToPosition([partId], targetPartId, position);
+  }
 
-    const confirmed = window.confirm(`Unpack "${path}" into its parent folder?`);
+  function movePartsToPosition(partIds: string[], targetPartId: string, position: "before" | "after") {
+    const movingIds = new Set(partIds);
+    if (movingIds.has(targetPartId)) return;
+
+    const targetPart = parts.find((part) => part.id === targetPartId);
+    if (!targetPart) return;
+
+    const movingParts = parts.filter((part) => movingIds.has(part.id)).map((part) => ({ ...part, folder: targetPart.folder || "" }));
+    if (movingParts.length === 0) return;
+
+    const partsWithoutMovingParts = parts.filter((part) => !movingIds.has(part.id));
+    const targetIndex = partsWithoutMovingParts.findIndex((part) => part.id === targetPartId);
+    if (targetIndex < 0) return;
+
+    const insertIndex = position === "before" ? targetIndex : targetIndex + 1;
+    const nextParts = [
+      ...partsWithoutMovingParts.slice(0, insertIndex),
+      ...movingParts,
+      ...partsWithoutMovingParts.slice(insertIndex)
+    ];
+    persist(nextParts, folders);
+  }
+
+  async function renameFolder(folderId: string) {
+    const folder = folders.find((candidate) => candidate.id === folderId);
+    if (!folder) return;
+    const nextName = window.prompt("Rename folder", folder.name)?.trim();
+    if (!nextName) return;
+    if (nextName === folder.name) return;
+    const nextFolders = folders.map((candidate) => candidate.id === folderId ? { ...candidate, name: nextName } : candidate);
+    persist(parts, nextFolders);
+  }
+
+  async function unpackFolder(folderId: string) {
+    const folder = folders.find((candidate) => candidate.id === folderId);
+    if (!folder) return;
+    const parent = getParentFolder(folderId, folders);
+    const parentId = parent === "All" ? "" : parent;
+
+    const confirmed = window.confirm(`Unpack "${folder.name}" into its parent folder?`);
     if (!confirmed) return;
 
-    const nextParts = parts.map((part) => ({ ...part, folder: rewrite(part.folder || "") }));
-    const nextFolders = uniqueInOrder(folders.filter((folder) => folder !== path).map(rewrite).filter(Boolean) as string[]);
+    const nextParts = parts.map((part) => (part.folder === folderId ? { ...part, folder: parentId } : part));
+    const nextFolders = folders
+      .filter((candidate) => candidate.id !== folderId)
+      .map((candidate) => candidate.parentId === folderId ? { ...candidate, parentId } : candidate);
     const saved = persist(nextParts, nextFolders);
     if (saved) setFolderFilter(parent);
   }
 
-  function handleFolderDrop(event: DragEvent<HTMLElement>, targetFolder: string) {
+  function getFolderDropPosition(event: DragEvent<HTMLElement>, allowInsert = true): FolderDropPosition {
+    if (!allowInsert) return "inside";
+    const rect = event.currentTarget.getBoundingClientRect();
+    const offset = event.clientY - rect.top;
+    const topZone = rect.height * 0.25;
+    const bottomZone = rect.height * 0.75;
+    if (offset < topZone) return "before";
+    if (offset > bottomZone) return "after";
+    return "inside";
+  }
+
+  function updateFolderDragIndicator(event: DragEvent<HTMLElement>, targetFolder: string, allowInsert = true) {
     event.preventDefault();
+    event.stopPropagation();
+    if (!draggingFolder) return;
+    setDragPosition({ x: event.clientX, y: event.clientY });
+    setFolderDropIndicator({
+      path: targetFolder,
+      position: getFolderDropPosition(event, allowInsert)
+    });
+  }
+
+  function clearFolderDragState() {
+    setDraggingFolder(null);
+    setFolderDropIndicator(null);
+  }
+
+  function clearPartDragState() {
+    setDraggingPartId(null);
+    setPartDropIndicator(null);
+  }
+
+  function clearDragState() {
+    clearFolderDragState();
+    clearPartDragState();
+  }
+
+  function getPartDropPosition(event: DragEvent<HTMLElement>): "before" | "after" {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return event.clientY - rect.top < rect.height / 2 ? "before" : "after";
+  }
+
+  function updatePartDragIndicator(event: DragEvent<HTMLElement>, targetPartId: string) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!draggingPartId) return;
+    setDragPosition({ x: event.clientX, y: event.clientY });
+    setPartDropIndicator({
+      id: targetPartId,
+      position: getPartDropPosition(event)
+    });
+  }
+
+  function handleFolderDrop(event: DragEvent<HTMLElement>, targetFolder: string, position?: FolderDropPosition) {
+    event.preventDefault();
+    event.stopPropagation();
     const raw = event.dataTransfer.getData("application/json");
-    if (!raw) return;
+    if (!raw) {
+      clearFolderDragState();
+      return;
+    }
 
     try {
-      const payload = JSON.parse(raw) as { type: string; id?: string; path?: string };
-      if (payload.type === "part" && payload.id) {
-        void movePartToFolder(payload.id, targetFolder === "All" ? "" : targetFolder);
+      const payload = JSON.parse(raw) as { type: string; id?: string; ids?: string[]; path?: string };
+      if (payload.type === "part") {
+        const partIds = payload.ids?.length ? payload.ids : payload.id ? [payload.id] : [];
+        if (partIds.length) void movePartsToFolder(partIds, targetFolder === "All" ? "" : targetFolder);
       }
       if (payload.type === "folder" && payload.path) {
-        void moveFolder(payload.path, targetFolder === "All" ? "" : targetFolder);
+        const dropPosition = position ?? folderDropIndicator?.position ?? "inside";
+        if (targetFolder === "All") {
+          void moveFolder(payload.path, "");
+        } else {
+          void moveFolderToPosition(payload.path, targetFolder, dropPosition);
+        }
       }
     } catch {
       setSheetMessage("Could not read dragged item.");
+    } finally {
+      clearDragState();
     }
   }
 
-  function getFolderDirectCount(path: string) {
-    return parts.filter((part) => (part.folder || "") === path).length;
-  }
-
-  function getSiblingFolders(path: string) {
-    const parent = getParentFolder(path);
-    if (parent === "All") {
-      return folders.filter((folder) => splitFolderPath(folder).length === 1);
+  function handlePartDrop(event: DragEvent<HTMLTableRowElement>, targetPartId: string) {
+    event.preventDefault();
+    event.stopPropagation();
+    const raw = event.dataTransfer.getData("application/json");
+    if (!raw) {
+      clearDragState();
+      return;
     }
-    return getDirectChildFolders(parent, folders);
+
+    try {
+      const payload = JSON.parse(raw) as { type: string; id?: string; ids?: string[] };
+      if (payload.type === "part") {
+        const partIds = payload.ids?.length ? payload.ids : payload.id ? [payload.id] : [];
+        movePartsToPosition(partIds, targetPartId, partDropIndicator?.position ?? getPartDropPosition(event));
+      }
+    } catch {
+      setSheetMessage("Could not read dragged part.");
+    } finally {
+      clearDragState();
+    }
   }
 
-  function reorderFolder(path: string, direction: -1 | 1) {
-    const siblings = getSiblingFolders(path);
-    const siblingIndex = siblings.indexOf(path);
-    const targetSibling = siblings[siblingIndex + direction];
-    if (!targetSibling) return;
-
-    const movingGroup = getFolderGroup(path, folders);
-    const targetGroup = getFolderGroup(targetSibling, folders);
-    const movingSet = new Set(movingGroup);
-    const withoutMovingGroup = folders.filter((folder) => !movingSet.has(folder));
-    const targetIndex = withoutMovingGroup.indexOf(targetSibling);
-    const insertIndex = direction < 0 ? targetIndex : targetIndex + targetGroup.length;
-    const nextFolders = [
-      ...withoutMovingGroup.slice(0, insertIndex),
-      ...movingGroup,
-      ...withoutMovingGroup.slice(insertIndex)
-    ];
-
-    persist(parts, uniqueInOrder(nextFolders));
+  function getFolderDirectCount(folderId: string) {
+    return parts.filter((part) => part.itemKind === activeSection && (part.folder || "") === folderId).length;
   }
 
   function removeProcess(index: number) {
@@ -983,13 +1212,22 @@ export function App() {
     const nextPart = formToPart(
       {
         ...form,
+        itemKind: editingId ? form.itemKind : activeSection,
+        linkedBomId: (editingId ? form.itemKind : activeSection) === "production" ? form.linkedBomId : "",
         partNumber: visiblePartNumber,
         originalPartNumber: form.originalPartNumber || generatedPartNumber,
         folder: editingId ? form.folder : folderFilter === "All" ? "" : folderFilter
       },
       editingId ?? undefined
     );
-    if (nextPart.processes.length === 0) nextPart.processes = [{ name: "Unassigned", status: "Not Started" }];
+    if (nextPart.itemKind === "production" && nextPart.processes.length === 0) {
+      nextPart.processes = [{ name: "Unassigned", status: "Not Started" }];
+    }
+    if (nextPart.itemKind === "bom") {
+      nextPart.processes = [];
+      nextPart.drawingUrl = "";
+      nextPart.linkedBomId = "";
+    }
     const nextParts = editingId
       ? parts.map((part) => (part.id === editingId ? nextPart : part))
       : [nextPart, ...parts];
@@ -998,6 +1236,7 @@ export function App() {
     if (saved) {
       setForm({
         ...emptyForm,
+        itemKind: activeSection,
         partNumber: generateNextPartNumber(nextParts),
         originalPartNumber: generateNextPartNumber(nextParts)
       });
@@ -1008,6 +1247,7 @@ export function App() {
   function editPart(part: Part) {
     setPreviewPartId(part.id);
     setEditingId(part.id);
+    setActiveSection(part.itemKind);
     setForm(partToForm(part));
     setProcessDraft({ name: "", status: "Not Started" });
   }
@@ -1026,6 +1266,7 @@ export function App() {
     persist(parts.filter((part) => !selected.has(part.id)));
     if (previewPartId && selected.has(previewPartId)) setPreviewPartId(null);
     setSelected(new Set());
+    setLastSelectedPartId(null);
   }
 
   function downloadCsv() {
@@ -1033,7 +1274,11 @@ export function App() {
       csvHeaders.join(","),
       ...parts.map((part) =>
         csvHeaders
-          .map((header) => escapeCsv(header === "processes" ? serializeProcesses(part.processes) : part[header]))
+          .map((header) => {
+            if (header === "processes") return escapeCsv(serializeProcesses(part.processes));
+            if (header === "folder") return escapeCsv(part.folder ? getFolderDisplayPath(part.folder, folders) : "");
+            return escapeCsv(part[header]);
+          })
           .join(",")
       )
     ].join("\n");
@@ -1052,16 +1297,42 @@ export function App() {
     const headerRow = rows[0]?.map((header) => header.trim()) ?? [];
     if (headerRow.length === 0) return;
 
+    const importedFolders = [...folders];
+    const importedPathToId = new Map(importedFolders.map((folder) => [getFolderDisplayPath(folder.id, importedFolders), folder.id]));
+    const ensureImportedFolderPath = (path: string) => {
+      const normalizedPath = normalizeFolderPath(path);
+      if (!normalizedPath) return "";
+      const existingId = importedPathToId.get(normalizedPath);
+      if (existingId) return existingId;
+
+      let parentId = "";
+      let currentPath = "";
+      splitFolderPath(normalizedPath).forEach((name) => {
+        currentPath = currentPath ? `${currentPath} / ${name}` : name;
+        const currentId = importedPathToId.get(currentPath);
+        if (currentId) {
+          parentId = currentId;
+          return;
+        }
+        const folder = { id: makeFolderId(), name, parentId };
+        importedFolders.push(folder);
+        importedPathToId.set(currentPath, folder.id);
+        parentId = folder.id;
+      });
+      return parentId;
+    };
+
     const importedParts = rows.slice(1).map((row) => {
       const record = Object.fromEntries(headerRow.map((header, index) => [header, row[index] ?? ""]));
       const material = [record.material, record.profile].filter(Boolean).join(", ");
+      const folderId = ensureImportedFolderPath(record.folder ?? "");
 
       return formToPart(
         {
           name: record.name ?? "",
           partNumber: record.partNumber ?? "",
           originalPartNumber: record.originalPartNumber || record.partNumber || "",
-          folder: record.folder === "Unfiled" ? "" : normalizeFolderPath(record.folder ?? ""),
+          folder: record.folder === "Unfiled" ? "" : folderId,
           quantity: record.quantity ?? "0",
           unitPrice: record.unitPrice ?? "0",
           material,
@@ -1070,13 +1341,15 @@ export function App() {
           drawingUrl: record.drawingUrl ?? "",
           vendor: record.vendor ?? "",
           location: record.location ?? "",
-          notes: record.notes ?? ""
+          notes: record.notes ?? "",
+          itemKind: record.itemKind === "production" ? "production" : "bom",
+          linkedBomId: record.linkedBomId ?? ""
         },
         record.id || undefined
       );
     });
 
-    persist([...importedParts, ...parts]);
+    persist([...importedParts, ...parts], importedFolders);
     event.target.value = "";
   }
 
@@ -1087,6 +1360,43 @@ export function App() {
       else next.add(id);
       return next;
     });
+    setLastSelectedPartId(id);
+  }
+
+  function selectPartRange(anchorId: string, targetId: string) {
+    const anchorIndex = filteredParts.findIndex((part) => part.id === anchorId);
+    const targetIndex = filteredParts.findIndex((part) => part.id === targetId);
+    if (anchorIndex < 0 || targetIndex < 0) return [targetId];
+
+    const start = Math.min(anchorIndex, targetIndex);
+    const end = Math.max(anchorIndex, targetIndex);
+    return filteredParts.slice(start, end + 1).map((part) => part.id);
+  }
+
+  function selectPartLikeFileManager(id: string, event: MouseEvent) {
+    if (event.shiftKey && lastSelectedPartId) {
+      const rangeIds = selectPartRange(lastSelectedPartId, id);
+      setSelected((current) => {
+        const next = new Set(current);
+        rangeIds.forEach((partId) => next.add(partId));
+        return next;
+      });
+      return;
+    }
+
+    if (event.ctrlKey || event.metaKey) {
+      toggleSelected(id);
+      return;
+    }
+
+    setSelected(new Set([id]));
+    setLastSelectedPartId(id);
+  }
+
+  function handlePartRowClick(part: Part, event: MouseEvent<HTMLTableRowElement>) {
+    const target = event.target as HTMLElement;
+    if (target.closest("button,a,input,select,textarea")) return;
+    selectPartLikeFileManager(part.id, event);
   }
 
   function toggleAllFiltered() {
@@ -1102,65 +1412,72 @@ export function App() {
   }
 
   function renderFolderNode(node: FolderNode, depth = 0) {
-    const isExpanded = expandedFolders.has(node.path);
+    const isExpanded = expandedFolders.has(node.id);
     const hasChildren = node.children.length > 0;
-    const siblings = getSiblingFolders(node.path);
-    const siblingIndex = siblings.indexOf(node.path);
+    const dropPosition = folderDropIndicator?.path === node.id ? folderDropIndicator.position : null;
 
     return (
-      <div
-        className="folder-node"
-        key={node.path}
-        onDragOver={(event) => event.preventDefault()}
-        onDrop={(event) => handleFolderDrop(event, node.path)}
-      >
-        <div className="folder-row" style={{ paddingLeft: `${depth * 14}px` }}>
+      <div className="folder-node" key={node.id}>
+        <div
+          className={[
+            "folder-row",
+            draggingFolder === node.id ? "dragging" : "",
+            dropPosition ? `drop-${dropPosition}` : ""
+          ].filter(Boolean).join(" ")}
+          draggable
+          onDragStart={(event) => {
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("application/json", JSON.stringify({ type: "folder", path: node.id }));
+            const dragImage = document.createElement("div");
+            dragImage.className = "folder-drag-image";
+            document.body.appendChild(dragImage);
+            event.dataTransfer.setDragImage(dragImage, 0, 0);
+            window.setTimeout(() => dragImage.remove(), 0);
+            setDraggingFolder(node.id);
+            setDragPosition({ x: event.clientX, y: event.clientY });
+          }}
+          onDrag={(event) => {
+            if (event.clientX || event.clientY) setDragPosition({ x: event.clientX, y: event.clientY });
+          }}
+          onDragOver={(event) => updateFolderDragIndicator(event, node.id)}
+          onDrop={(event) => handleFolderDrop(event, node.id, draggingFolder ? getFolderDropPosition(event) : "inside")}
+          onDragEnd={clearDragState}
+          style={{ paddingLeft: `${depth * 14}px` }}
+        >
           <button
             className="folder-toggle"
             disabled={!hasChildren}
             type="button"
-            onClick={() => toggleFolder(node.path)}
+            onClick={(event) => {
+              event.stopPropagation();
+              toggleFolder(node.id);
+            }}
             title={hasChildren ? "Expand folder" : "No nested folders"}
           >
             {hasChildren ? (isExpanded ? "v" : ">") : ""}
           </button>
           <button
-            className={`folder-button ${folderFilter === node.path ? "active" : ""}`}
-            draggable
+            className={`folder-button ${folderFilter === node.id ? "active" : ""}`}
             type="button"
-            onDragStart={(event) => {
-              event.dataTransfer.setData("application/json", JSON.stringify({ type: "folder", path: node.path }));
+            onClick={(event) => {
+              event.stopPropagation();
+              setFolderFilter(node.id);
             }}
-            onClick={() => setFolderFilter(node.path)}
           >
+            {dropPosition === "inside" && <Folder size={14} />}
             <span>{node.name}</span>
             <strong>{node.totalCount}</strong>
           </button>
           <button
             className="icon-button folder-remove"
             type="button"
-            onClick={() => void removeFolder(node.path)}
+            onClick={(event) => {
+              event.stopPropagation();
+              void removeFolder(node.id);
+            }}
             title="Remove folder"
           >
             <X size={14} />
-          </button>
-          <button
-            className="icon-button folder-order"
-            disabled={siblingIndex <= 0}
-            type="button"
-            onClick={() => reorderFolder(node.path, -1)}
-            title="Move folder up"
-          >
-            ^
-          </button>
-          <button
-            className="icon-button folder-order"
-            disabled={siblingIndex === -1 || siblingIndex >= siblings.length - 1}
-            type="button"
-            onClick={() => reorderFolder(node.path, 1)}
-            title="Move folder down"
-          >
-            v
           </button>
         </div>
         {hasChildren && isExpanded && node.children.map((child) => renderFolderNode(child, depth + 1))}
@@ -1170,6 +1487,22 @@ export function App() {
 
   return (
     <main className="app-shell">
+      {draggingFolder && (
+        <div className="folder-drag-ghost" style={{ left: dragPosition.x + 12, top: dragPosition.y + 12 }}>
+          <Folder size={15} />
+          <span>{folders.find((folder) => folder.id === draggingFolder)?.name || "Folder"}</span>
+        </div>
+      )}
+      {draggingPartId && (
+        <div className="folder-drag-ghost" style={{ left: dragPosition.x + 12, top: dragPosition.y + 12 }}>
+          <FileJson size={15} />
+          <span>
+            {selected.has(draggingPartId) && selected.size > 1
+              ? `${selected.size} parts`
+              : parts.find((part) => part.id === draggingPartId)?.name || "Part"}
+          </span>
+        </div>
+      )}
       <section className="hero">
         <div>
           <p className="eyebrow">Google Sheet workspace</p>
@@ -1250,8 +1583,8 @@ export function App() {
 
       <section className="stats-grid">
         <article>
-          <span>Total Parts</span>
-          <strong>{parts.length}</strong>
+          <span>BOM Items</span>
+          <strong>{bomItems.length}</strong>
         </article>
         <article>
           <span>Inventory Value</span>
@@ -1262,9 +1595,34 @@ export function App() {
           <strong>{lowStockCount}</strong>
         </article>
         <article>
-          <span>Blocked Routes</span>
+          <span>Blocked Production</span>
           <strong>{blockedCount}</strong>
         </article>
+      </section>
+
+      <section className="section-tabs" aria-label="Workspace section">
+        <button
+          className={activeSection === "bom" ? "active" : ""}
+          type="button"
+          onClick={() => {
+            setActiveSection("bom");
+            setEditingId(null);
+            setForm({ ...emptyForm, itemKind: "bom", partNumber: nextPartNumber, originalPartNumber: nextPartNumber });
+          }}
+        >
+          Bill of Materials
+        </button>
+        <button
+          className={activeSection === "production" ? "active" : ""}
+          type="button"
+          onClick={() => {
+            setActiveSection("production");
+            setEditingId(null);
+            setForm({ ...emptyForm, itemKind: "production", partNumber: nextPartNumber, originalPartNumber: nextPartNumber });
+          }}
+        >
+          Production Tracker
+        </button>
       </section>
 
       <section className="workspace">
@@ -1272,7 +1630,13 @@ export function App() {
           <div className="panel-heading">
             <div>
               <p className="eyebrow">{editingId ? "Editing part" : "New part"}</p>
-              <h2>{editingId ? form.name || "Untitled Part" : "Add Inventory"}</h2>
+              <h2>
+                {editingId
+                  ? form.name || "Untitled Item"
+                  : activeSection === "bom"
+                    ? "Add BOM Item"
+                    : "Add Production Item"}
+              </h2>
             </div>
             {editingId && (
               <button
@@ -1282,6 +1646,7 @@ export function App() {
                   setEditingId(null);
                   setForm({
                     ...emptyForm,
+                    itemKind: activeSection,
                     partNumber: nextPartNumber,
                     originalPartNumber: nextPartNumber
                   });
@@ -1295,7 +1660,7 @@ export function App() {
 
           <div className="form-grid">
             <label>
-              Part name
+              {activeSection === "bom" ? "BOM item name" : "Production item name"}
               <input required value={form.name} onChange={(event) => updateForm("name", event.target.value)} />
             </label>
             <label>
@@ -1316,53 +1681,71 @@ export function App() {
                 </button>
               </div>
             </label>
-            <label>
-              Quantity
-              <input
-                min="0"
-                type="number"
-                value={form.quantity}
-                onChange={(event) => updateForm("quantity", event.target.value)}
-              />
-            </label>
-            <label>
-              Unit price
-              <input
-                min="0"
-                step="0.01"
-                type="number"
-                value={form.unitPrice}
-                onChange={(event) => updateForm("unitPrice", event.target.value)}
-              />
-            </label>
-            <label>
-              Material / profile
-              <input value={form.material} onChange={(event) => updateForm("material", event.target.value)} />
-            </label>
-            <label>
-              Thickness
-              <input value={form.thickness} onChange={(event) => updateForm("thickness", event.target.value)} />
-            </label>
-            <label>
-              Vendor
-              <input value={form.vendor} onChange={(event) => updateForm("vendor", event.target.value)} />
-            </label>
-            <label>
-              Location
-              <input value={form.location} onChange={(event) => updateForm("location", event.target.value)} />
-            </label>
-            <label className="span-two">
-              Onshape drawing link
-              <input
-                placeholder="https://cad.onshape.com/documents/..."
-                type="url"
-                value={form.drawingUrl}
-                onChange={(event) => updateForm("drawingUrl", event.target.value)}
-              />
-            </label>
+            {activeSection === "bom" ? (
+              <>
+                <label>
+                  Quantity
+                  <input
+                    min="0"
+                    type="number"
+                    value={form.quantity}
+                    onChange={(event) => updateForm("quantity", event.target.value)}
+                  />
+                </label>
+                <label>
+                  Unit price
+                  <input
+                    min="0"
+                    step="0.01"
+                    type="number"
+                    value={form.unitPrice}
+                    onChange={(event) => updateForm("unitPrice", event.target.value)}
+                  />
+                </label>
+                <label>
+                  Material / profile
+                  <input value={form.material} onChange={(event) => updateForm("material", event.target.value)} />
+                </label>
+                <label>
+                  Stock / component type
+                  <input value={form.thickness} onChange={(event) => updateForm("thickness", event.target.value)} />
+                </label>
+                <label>
+                  Vendor
+                  <input value={form.vendor} onChange={(event) => updateForm("vendor", event.target.value)} />
+                </label>
+                <label>
+                  Location
+                  <input value={form.location} onChange={(event) => updateForm("location", event.target.value)} />
+                </label>
+              </>
+            ) : (
+              <>
+                <label className="span-two">
+                  Linked BOM item
+                  <select value={form.linkedBomId} onChange={(event) => updateForm("linkedBomId", event.target.value)}>
+                    <option value="">No linked BOM item</option>
+                    {bomItems.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.partNumber ? `${item.partNumber} - ${item.name}` : item.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="span-two">
+                  Onshape drawing link
+                  <input
+                    placeholder="https://cad.onshape.com/documents/..."
+                    type="url"
+                    value={form.drawingUrl}
+                    onChange={(event) => updateForm("drawingUrl", event.target.value)}
+                  />
+                </label>
+              </>
+            )}
           </div>
 
-          <section className="process-editor">
+          {activeSection === "production" && <section className="process-editor">
             <div className="process-heading">
               <span>Processes</span>
             </div>
@@ -1417,7 +1800,7 @@ export function App() {
               </div>
             ))}
             {form.processes.length === 0 && <div className="process-empty">No processes added yet.</div>}
-          </section>
+          </section>}
 
           <label>
             Notes
@@ -1426,7 +1809,7 @@ export function App() {
 
           <button className="button primary wide" disabled={isSheetLoading || !sheetWebAppUrl} type="submit">
             {editingId ? <Database size={16} /> : <PackagePlus size={16} />}
-            {editingId ? "Save Part" : "Add Part"}
+            {editingId ? "Save Item" : activeSection === "bom" ? "Add BOM Item" : "Add Production Item"}
           </button>
         </form>
 
@@ -1438,12 +1821,18 @@ export function App() {
             </div>
           </div>
           <button
-            className={`folder-button ${folderFilter === "All" ? "active" : ""}`}
+            className={[
+              "folder-button",
+              folderFilter === "All" ? "active" : "",
+              folderDropIndicator?.path === "All" ? "drop-inside" : ""
+            ].filter(Boolean).join(" ")}
             type="button"
-            onDragOver={(event) => event.preventDefault()}
-            onDrop={(event) => handleFolderDrop(event, "All")}
+            onDragOver={(event) => updateFolderDragIndicator(event, "All", false)}
+            onDrop={(event) => handleFolderDrop(event, "All", "inside")}
+            onDragEnd={clearDragState}
             onClick={() => setFolderFilter("All")}
           >
+            {folderDropIndicator?.path === "All" && <Folder size={14} />}
             <span>Root</span>
             <strong>{getFolderDirectCount("")}</strong>
           </button>
@@ -1458,12 +1847,12 @@ export function App() {
               <Search size={16} />
               <input
                 aria-label="Search parts"
-                placeholder="Search names, numbers, materials, processes..."
+                placeholder={activeSection === "bom" ? "Search BOM items, numbers, materials..." : "Search drawings, part numbers, processes..."}
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
               />
             </div>
-            <div className="filters">
+            {activeSection === "production" && <div className="filters">
               <Filter size={16} />
               <select
                 value={statusFilter}
@@ -1479,7 +1868,7 @@ export function App() {
                   <option key={process}>{process}</option>
                 ))}
               </select>
-            </div>
+            </div>}
           </div>
 
           <div
@@ -1513,9 +1902,9 @@ export function App() {
               {breadcrumbFolders.map((folder) => (
                 <button
                   className="breadcrumb"
-                  key={folder.path}
+                  key={folder.id}
                   type="button"
-                  onClick={() => setFolderFilter(folder.path)}
+                  onClick={() => setFolderFilter(folder.id)}
                 >
                   / {folder.name}
                 </button>
@@ -1526,7 +1915,7 @@ export function App() {
               <button
                 className="folder-tile parent-folder"
                 type="button"
-                onClick={() => setFolderFilter(getParentFolder(folderFilter))}
+                onClick={() => setFolderFilter(getParentFolder(folderFilter, folders))}
               >
                 <span>..</span>
                 <small>Parent folder</small>
@@ -1535,26 +1924,25 @@ export function App() {
 
             <div className="folder-tile-grid">
               {childFolders.map((folder) => {
-                const name = splitFolderPath(folder).slice(-1)[0] || folder;
                 return (
                   <div
                     className="folder-tile"
                     draggable
-                    key={folder}
-                    onClick={() => setFolderFilter(folder)}
+                    key={folder.id}
+                    onClick={() => setFolderFilter(folder.id)}
                     onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") setFolderFilter(folder);
+                      if (event.key === "Enter" || event.key === " ") setFolderFilter(folder.id);
                     }}
                     onDragOver={(event) => event.preventDefault()}
                     onDragStart={(event) => {
-                      event.dataTransfer.setData("application/json", JSON.stringify({ type: "folder", path: folder }));
+                      event.dataTransfer.setData("application/json", JSON.stringify({ type: "folder", path: folder.id }));
                     }}
-                    onDrop={(event) => handleFolderDrop(event, folder)}
+                    onDrop={(event) => handleFolderDrop(event, folder.id)}
                     role="button"
                     tabIndex={0}
                   >
-                    <span>{name}</span>
-                    <small>{getFolderDirectCount(folder)} direct part(s)</small>
+                    <span>{folder.name}</span>
+                    <small>{getFolderDirectCount(folder.id)} direct part(s)</small>
                   </div>
                 );
               })}
@@ -1563,7 +1951,7 @@ export function App() {
 
           <div className="table-heading">
             <span>
-              {query.trim() ? "Search Results" : "Current Folder"} ({filteredParts.length} part(s))
+              {activeSection === "bom" ? "Bill of Materials" : "Production Tracker"} ({filteredParts.length} item(s))
             </span>
             <div>
               {selected.size > 0 && (
@@ -1586,56 +1974,111 @@ export function App() {
                   <th>Name</th>
                   <th>Folder</th>
                   <th>Part #</th>
-                  <th>Material / Profile</th>
-                  <th>Processes</th>
-                  <th>Qty</th>
-                  <th>Price</th>
+                  {activeSection === "bom" ? <th>Material / Stock</th> : <th>Linked BOM Item</th>}
+                  {activeSection === "production" && <th>Processes</th>}
+                  {activeSection === "production" ? <th>Drawing</th> : (
+                    <>
+                      <th>Qty</th>
+                      <th>Price</th>
+                    </>
+                  )}
                   <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {filteredParts.map((part) => (
+                {filteredParts.map((part) => {
+                  const partDropPosition = partDropIndicator?.id === part.id ? partDropIndicator.position : null;
+                  return (
                   <tr
+                    className={[
+                      draggingPartId === part.id ? "dragging" : "",
+                      partDropPosition ? `drop-${partDropPosition}` : ""
+                    ].filter(Boolean).join(" ")}
                     draggable
                     key={part.id}
+                    onClick={(event) => handlePartRowClick(part, event)}
                     onDragStart={(event) => {
-                      event.dataTransfer.setData("application/json", JSON.stringify({ type: "part", id: part.id }));
+                      event.dataTransfer.effectAllowed = "move";
+                      const draggedIds = selected.has(part.id)
+                        ? filteredParts.filter((candidate) => selected.has(candidate.id)).map((candidate) => candidate.id)
+                        : [part.id];
+                      event.dataTransfer.setData(
+                        "application/json",
+                        JSON.stringify({ type: "part", id: part.id, ids: draggedIds })
+                      );
+                      if (!selected.has(part.id)) {
+                        setSelected(new Set([part.id]));
+                        setLastSelectedPartId(part.id);
+                      }
+                      setDraggingPartId(part.id);
+                      setDragPosition({ x: event.clientX, y: event.clientY });
                     }}
+                    onDrag={(event) => {
+                      if (event.clientX || event.clientY) setDragPosition({ x: event.clientX, y: event.clientY });
+                    }}
+                    onDragOver={(event) => updatePartDragIndicator(event, part.id)}
+                    onDrop={(event) => handlePartDrop(event, part.id)}
+                    onDragEnd={clearDragState}
                   >
                     <td>
                       <input
                         aria-label={`Select ${part.name}`}
                         type="checkbox"
                         checked={selected.has(part.id)}
-                        onChange={() => toggleSelected(part.id)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          selectPartLikeFileManager(part.id, event);
+                        }}
+                        onChange={() => undefined}
                       />
                     </td>
                     <td>
                       <button className="part-name" type="button" onClick={() => editPart(part)}>
                         <span>{part.name}</span>
-                        <small>{part.vendor || "No vendor"} - {part.location || "No location"}</small>
+                        <small>
+                          {activeSection === "bom"
+                            ? `${part.vendor || "No vendor"} - ${part.location || "No location"}`
+                            : part.drawingUrl ? "Drawing linked" : "No drawing"}
+                        </small>
                       </button>
                     </td>
-                    <td>{part.folder || "Root"}</td>
+                    <td>{part.folder ? getFolderDisplayPath(part.folder, folders) || "Unknown folder" : "Root"}</td>
                     <td>{part.partNumber}</td>
                     <td>
-                      <div>{part.material}</div>
-                      <small>{part.thickness}</small>
+                      {activeSection === "bom" ? (
+                        <>
+                          <div>{part.material}</div>
+                          <small>{part.thickness}</small>
+                        </>
+                      ) : (
+                        <>
+                          <div>{bomItems.find((item) => item.id === part.linkedBomId)?.name || "No BOM link"}</div>
+                          <small>{bomItems.find((item) => item.id === part.linkedBomId)?.partNumber || ""}</small>
+                        </>
+                      )}
                     </td>
-                    <td>
-                      <div className="process-chips">
-                        {part.processes.map((process) => (
-                          <span
-                            className={`process-chip ${process.status.toLowerCase().replace(/\s+/g, "-")}`}
-                            key={`${part.id}-${process.name}-${process.status}`}
-                          >
-                            {process.name}: {process.status}
-                          </span>
-                        ))}
-                      </div>
-                    </td>
-                    <td>{part.quantity}</td>
-                    <td>${part.unitPrice.toFixed(2)}</td>
+                    {activeSection === "production" && (
+                      <td>
+                        <div className="process-chips">
+                          {part.processes.map((process) => (
+                            <span
+                              className={`process-chip ${process.status.toLowerCase().replace(/\s+/g, "-")}`}
+                              key={`${part.id}-${process.name}-${process.status}`}
+                            >
+                              {process.name}: {process.status}
+                            </span>
+                          ))}
+                        </div>
+                      </td>
+                    )}
+                    {activeSection === "production" ? (
+                      <td>{part.drawingUrl ? "Linked" : "Missing"}</td>
+                    ) : (
+                      <>
+                        <td>{part.quantity}</td>
+                        <td>${part.unitPrice.toFixed(2)}</td>
+                      </>
+                    )}
                     <td>
                       <div className="row-actions">
                         <button type="button" onClick={() => editPart(part)}>Edit</button>
@@ -1645,12 +2088,13 @@ export function App() {
                       </div>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
 
-          {previewPart && (
+          {previewPart && previewPart.itemKind === "production" && (
             <section className="drawing-preview">
               <div className="preview-heading">
                 <div>
