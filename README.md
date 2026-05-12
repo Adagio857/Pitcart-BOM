@@ -4,6 +4,8 @@ A local TypeScript/React interface for a Google Sheet-backed parts library. The 
 
 For speed, edits are applied immediately in the browser and cached locally, then synced to Google Sheets about every 30 seconds. Use **Sync Now** before closing the app if the status shows unsynced local changes.
 
+Before each sync, the app pulls the latest Sheet data and merges in parts other people added. If two users created the same generated part number, the app renumbers the local conflicting part before writing. The Apps Script also enforces unique part numbers while writing to the Sheet.
+
 ## Run Locally
 
 1. Install Node.js LTS from https://nodejs.org/
@@ -37,7 +39,12 @@ This project can be hosted as a static GitHub Pages site.
 
 The workflow builds the app with `VITE_BASE_PATH` set to `/<repo-name>/`, which is the path GitHub Pages uses for project sites.
 
-The app still needs your deployed Apps Script `/exec` URL and Google Sheet URL entered in the connection panel after it opens.
+To bake the Apps Script URL and Sheet URL into the deployed app, add GitHub repository variables:
+
+- `VITE_APPS_SCRIPT_URL`
+- `VITE_GOOGLE_SHEET_URL`
+
+The connection panel can still override those values in the browser if needed.
 
 ## Google Sheet Setup
 
@@ -49,9 +56,9 @@ The app still needs your deployed Apps Script `/exec` URL and Google Sheet URL e
 6. Set **Execute as** to `Me`.
 7. Set **Who has access** to **Anyone**. This is needed because the local app writes to the web app without Google OAuth.
 8. Deploy and copy the `/exec` web app URL.
-9. Paste that URL into the app's **Apps Script web app URL** field.
-10. Paste your Google Sheet URL into the **Google Sheet URL** field.
-11. Click **Connect**.
+9. Add that `/exec` URL to `.env.local` for local development or to the GitHub repository variable `VITE_APPS_SCRIPT_URL` for Pages.
+10. Add your Google Sheet URL to `.env.local` or to `VITE_GOOGLE_SHEET_URL`.
+11. The connection panel will prefill from those values. Click **Connect** if you change them in the UI.
 
 The script creates/uses a `Parts` tab for part rows and a `Folders` tab for folder-only organization paths.
 
@@ -78,3 +85,5 @@ Process routes are stored as values like `Router:Done; Deburr:In Progress`.
 Nested folders are stored as slash-separated paths, such as `Subsystem / Intake / Plates`. Folder-only paths live in the `Folders` tab. Parts without a folder live in the root of the library. Deleting a folder moves affected parts to the deleted folder's parent.
 
 The library behaves like a file manager: use breadcrumbs to move through folders, create folders from the browser toolbar, open subfolders from folder tiles, drag parts from the table onto folders to move them, and drag folders onto other folders to nest/reorganize them. Folders can be renamed, unpacked into their parent, or deleted.
+
+Folder order is user-controlled and stored in the `Folders` tab. Use the up/down controls in the folder tree to reorder sibling folders.

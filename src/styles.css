@@ -427,7 +427,7 @@ textarea:focus {
 
 .folder-row {
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr) 30px;
+  grid-template-columns: 22px minmax(0, 1fr) 30px 30px 30px;
   gap: 6px;
   align-items: center;
 }
@@ -487,6 +487,14 @@ textarea:focus {
   width: 30px;
   height: 30px;
   color: #ff9292;
+}
+
+.folder-order {
+  width: 30px;
+  height: 30px;
+  color: #8da5a4;
+  font-size: var(--text-xs);
+  font-weight: 700;
 }
 
 .toolbar {

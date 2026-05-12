@@ -55,6 +55,8 @@ const SHEET_WEB_APP_URL_KEY = "parts-tracker.sheetWebAppUrl";
 const SHEET_URL_KEY = "parts-tracker.sheetUrl";
 const WORKSPACE_CACHE_KEY = "parts-tracker.workspaceCache.v1";
 const SYNC_INTERVAL_MS = 30000;
+const DEFAULT_APPS_SCRIPT_URL = import.meta.env.VITE_APPS_SCRIPT_URL || "";
+const DEFAULT_SHEET_URL = import.meta.env.VITE_GOOGLE_SHEET_URL || "";
 
 const processStatuses: ProcessStatus[] = [
   "Not Started",
@@ -112,7 +114,7 @@ function normalizePart(part: LegacyPart): Part {
     name: part.name || "",
     partNumber: part.partNumber || "",
     originalPartNumber: part.originalPartNumber || part.partNumber || "",
-    folder: part.folder === "Unfiled" ? "" : part.folder || "",
+    folder: part.folder === "Unfiled" ? "" : normalizeFolderPath(part.folder || ""),
     quantity: Number(part.quantity) || 0,
     unitPrice: Number(part.unitPrice) || 0,
     material: legacyMaterial || "",
@@ -209,14 +211,39 @@ function readWorkspaceFromSheet(webAppUrl: string): Promise<{ parts: Part[]; fol
 }
 
 async function writeWorkspaceToSheet(webAppUrl: string, parts: Part[], folders: string[]) {
-  await fetch(webAppUrl, {
-    method: "POST",
-    mode: "no-cors",
-    body: JSON.stringify({
-      action: "replaceAll",
-      parts,
-      folders
-    })
+  const result = await callScriptJsonp(webAppUrl, {
+    action: "replaceAll",
+    payload: JSON.stringify({ parts, folders })
+  });
+  if (!result.ok) throw new Error(result.error || "Google Sheet returned an error.");
+}
+
+function callScriptJsonp(webAppUrl: string, params: Record<string, string>): Promise<SheetResult> {
+  return new Promise((resolve, reject) => {
+    const callbackName = `partsTracker_${crypto.randomUUID().replace(/-/g, "")}`;
+    const script = document.createElement("script");
+    const timeoutId = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("Timed out while contacting the Google Sheet."));
+    }, 20000);
+
+    function cleanup() {
+      window.clearTimeout(timeoutId);
+      delete (window as unknown as Record<string, unknown>)[callbackName];
+      script.remove();
+    }
+
+    (window as unknown as Record<string, (result: SheetResult) => void>)[callbackName] = (result) => {
+      cleanup();
+      resolve(result);
+    };
+
+    script.src = buildScriptUrl(webAppUrl, { ...params, callback: callbackName });
+    script.onerror = () => {
+      cleanup();
+      reject(new Error("Could not reach the Google Apps Script web app."));
+    };
+    document.body.appendChild(script);
   });
 }
 
@@ -306,6 +333,80 @@ function generateNextPartNumber(parts: Part[]) {
   return `PT-${String(highest + 1).padStart(4, "0")}`;
 }
 
+function getPartNumberValue(partNumber: string) {
+  const match = partNumber.match(/(\d+)$/);
+  return match ? Number(match[1]) : 0;
+}
+
+function nextAvailablePartNumber(usedPartNumbers: Set<string>) {
+  let highest = 0;
+  usedPartNumbers.forEach((partNumber) => {
+    highest = Math.max(highest, getPartNumberValue(partNumber));
+  });
+
+  let next = highest + 1;
+  let candidate = `PT-${String(next).padStart(4, "0")}`;
+  while (usedPartNumbers.has(candidate)) {
+    next += 1;
+    candidate = `PT-${String(next).padStart(4, "0")}`;
+  }
+  return candidate;
+}
+
+function reconcileWorkspaceForSync(
+  localParts: Part[],
+  remoteParts: Part[],
+  localFolders: string[],
+  remoteFolders: string[]
+) {
+  const remoteById = new Map(remoteParts.map((part) => [part.id, part]));
+  const localById = new Map(localParts.map((part) => [part.id, part]));
+  const mergedParts = remoteParts.filter((part) => !localById.has(part.id));
+  const usedPartNumbers = new Set(mergedParts.map((part) => part.partNumber).filter(Boolean));
+  let renumberedCount = 0;
+
+  localParts.forEach((part) => {
+    const isNewToSheet = !remoteById.has(part.id);
+    const hasCollision = Boolean(part.partNumber && usedPartNumbers.has(part.partNumber));
+    let nextPart = part;
+
+    if (!part.partNumber || hasCollision) {
+      const nextNumber = nextAvailablePartNumber(usedPartNumbers);
+      nextPart = {
+        ...part,
+        partNumber: nextNumber,
+        originalPartNumber: isNewToSheet || !part.originalPartNumber ? nextNumber : part.originalPartNumber
+      };
+      renumberedCount += 1;
+    }
+
+    usedPartNumbers.add(nextPart.partNumber);
+    mergedParts.push(nextPart);
+  });
+
+  const mergedFolders = uniqueInOrder([
+    ...remoteFolders,
+    ...localFolders,
+    ...(mergedParts.map((part) => part.folder).filter(Boolean) as string[])
+  ]);
+
+  return { parts: mergedParts, folders: mergedFolders, renumberedCount };
+}
+
+function uniqueInOrder(values: string[]) {
+  const seen = new Set<string>();
+  const nextValues: string[] = [];
+
+  values.forEach((value) => {
+    const normalized = normalizeFolderPath(value);
+    if (!normalized || seen.has(normalized)) return false;
+    seen.add(normalized);
+    nextValues.push(normalized);
+  });
+
+  return nextValues;
+}
+
 type FolderNode = {
   path: string;
   name: string;
@@ -319,7 +420,7 @@ function buildFolderTree(folders: string[], parts: Part[]) {
   const countForPath = (path: string) => parts.filter((part) => (part.folder || "") === path).length;
 
   folders.forEach((folder) => {
-    const pieces = folder.split("/").map((piece) => piece.trim()).filter(Boolean);
+    const pieces = splitFolderPath(folder);
     let currentLevel = root;
     let currentPath = "";
 
@@ -342,16 +443,14 @@ function buildFolderTree(folders: string[], parts: Part[]) {
   });
 
   function finalize(nodes: FolderNode[]): FolderNode[] {
-    return nodes
-      .map((node) => {
-        const children = finalize(node.children);
-        return {
-          ...node,
-          children,
-          totalCount: node.count + children.reduce((sum, child) => sum + child.totalCount, 0)
-        };
-      })
-      .sort((a, b) => a.name.localeCompare(b.name));
+    return nodes.map((node) => {
+      const children = finalize(node.children);
+      return {
+        ...node,
+        children,
+        totalCount: node.count + children.reduce((sum, child) => sum + child.totalCount, 0)
+      };
+    });
   }
 
   return finalize(root);
@@ -359,6 +458,10 @@ function buildFolderTree(folders: string[], parts: Part[]) {
 
 function splitFolderPath(path: string) {
   return path.split("/").map((piece) => piece.trim()).filter(Boolean);
+}
+
+function normalizeFolderPath(path: string) {
+  return splitFolderPath(path).join(" / ");
 }
 
 function getParentFolder(path: string) {
@@ -384,7 +487,11 @@ function getDirectChildFolders(currentFolder: string, folders: string[]) {
     }
   });
 
-  return Array.from(children.values()).sort();
+  return Array.from(children.values()).sort((a, b) => folders.indexOf(a) - folders.indexOf(b));
+}
+
+function getFolderGroup(path: string, folders: string[]) {
+  return folders.filter((folder) => folder === path || folder.startsWith(`${path} / `));
 }
 
 function partToForm(part: Part): PartForm {
@@ -401,6 +508,7 @@ function formToPart(form: PartForm, id: string = crypto.randomUUID()): Part {
     id,
     partNumber: form.partNumber.trim(),
     originalPartNumber: form.originalPartNumber.trim(),
+    folder: normalizeFolderPath(form.folder),
     quantity: Number(form.quantity) || 0,
     unitPrice: Number(form.unitPrice) || 0,
     processes: form.processes
@@ -415,10 +523,14 @@ export function App() {
   const [folderPaths, setFolderPaths] = useState<string[]>(cachedWorkspace.folders);
   const [form, setForm] = useState<PartForm>(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [sheetWebAppUrl, setSheetWebAppUrl] = useState(() => localStorage.getItem(SHEET_WEB_APP_URL_KEY) || "");
-  const [sheetUrlDraft, setSheetUrlDraft] = useState(() => localStorage.getItem(SHEET_WEB_APP_URL_KEY) || "");
-  const [sheetUrl, setSheetUrl] = useState(() => localStorage.getItem(SHEET_URL_KEY) || "");
-  const [sheetLinkDraft, setSheetLinkDraft] = useState(() => localStorage.getItem(SHEET_URL_KEY) || "");
+  const [sheetWebAppUrl, setSheetWebAppUrl] = useState(
+    () => localStorage.getItem(SHEET_WEB_APP_URL_KEY) || DEFAULT_APPS_SCRIPT_URL
+  );
+  const [sheetUrlDraft, setSheetUrlDraft] = useState(
+    () => localStorage.getItem(SHEET_WEB_APP_URL_KEY) || DEFAULT_APPS_SCRIPT_URL
+  );
+  const [sheetUrl, setSheetUrl] = useState(() => localStorage.getItem(SHEET_URL_KEY) || DEFAULT_SHEET_URL);
+  const [sheetLinkDraft, setSheetLinkDraft] = useState(() => localStorage.getItem(SHEET_URL_KEY) || DEFAULT_SHEET_URL);
   const [isSheetLoading, setIsSheetLoading] = useState(false);
   const [hasPendingSync, setHasPendingSync] = useState(cachedWorkspace.dirty);
   const [sheetMessage, setSheetMessage] = useState(
@@ -465,12 +577,10 @@ export function App() {
     try {
       const workspace = await readWorkspaceFromSheet(url);
       const nextParts = workspace.parts;
-      const nextFolders = Array.from(
-        new Set([
-          ...workspace.folders.filter((folder) => folder !== "Unfiled"),
-          ...nextParts.map((part) => part.folder).filter(Boolean)
-        ])
-      ).sort() as string[];
+      const nextFolders = uniqueInOrder([
+        ...workspace.folders.filter((folder) => folder !== "Unfiled"),
+        ...(nextParts.map((part) => part.folder).filter(Boolean) as string[])
+      ]);
       setParts(nextParts);
       setFolderPaths(nextFolders);
       saveWorkspaceCache(nextParts, nextFolders, false);
@@ -501,12 +611,22 @@ export function App() {
     }
 
     setIsSheetLoading(true);
-    setSheetMessage("Syncing local changes to Google Sheet...");
+    setSheetMessage("Checking latest Sheet data before syncing...");
     try {
-      await writeWorkspaceToSheet(sheetWebAppUrl, parts, folderPaths);
-      saveWorkspaceCache(parts, folderPaths, false);
+      const remoteWorkspace = await readWorkspaceFromSheet(sheetWebAppUrl);
+      const reconciled = reconcileWorkspaceForSync(parts, remoteWorkspace.parts, folderPaths, remoteWorkspace.folders);
+
+      setSheetMessage("Syncing local changes to Google Sheet...");
+      await writeWorkspaceToSheet(sheetWebAppUrl, reconciled.parts, reconciled.folders);
+      setParts(reconciled.parts);
+      setFolderPaths(reconciled.folders);
+      saveWorkspaceCache(reconciled.parts, reconciled.folders, false);
       setHasPendingSync(false);
-      setSheetMessage(`Synced ${parts.length} parts to the Google Sheet.`);
+      setSheetMessage(
+        reconciled.renumberedCount
+          ? `Synced ${reconciled.parts.length} parts. Renumbered ${reconciled.renumberedCount} conflicting part(s).`
+          : `Synced ${reconciled.parts.length} parts to the Google Sheet.`
+      );
       return true;
     } catch (error) {
       setSheetMessage(error instanceof Error ? error.message : "Could not save to Google Sheet.");
@@ -540,7 +660,7 @@ export function App() {
   );
 
   const folders = useMemo(
-    () => Array.from(new Set([...folderPaths, ...parts.map((part) => part.folder).filter(Boolean)])).sort() as string[],
+    () => uniqueInOrder([...folderPaths, ...(parts.map((part) => part.folder).filter(Boolean) as string[])]),
     [folderPaths, parts]
   );
   const folderTree = useMemo(() => buildFolderTree(folders, parts), [folders, parts]);
@@ -553,6 +673,12 @@ export function App() {
       path: pieces.slice(0, index + 1).join(" / ")
     }));
   }, [folderFilter]);
+
+  useEffect(() => {
+    if (folderFilter !== "All" && !folders.includes(folderFilter)) {
+      setFolderFilter("All");
+    }
+  }, [folderFilter, folders]);
 
   const filteredParts = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -617,14 +743,19 @@ export function App() {
 
   async function createFolder(parent = folderFilter) {
     const folderName = window.prompt("Folder name");
-    const draft = folderName?.trim();
+    const draft = normalizeFolderPath(folderName || "");
     if (!draft) return;
-    const folder = draft.includes("/") || parent === "All" ? draft : `${parent} / ${draft}`;
-    const nextFolders = Array.from(new Set([...folders, folder])).sort();
+    const parentPath = parent === "All" ? "" : normalizeFolderPath(parent);
+    const folder = draft.includes("/") || !parentPath ? draft : `${parentPath} / ${draft}`;
+    if (folders.includes(folder)) {
+      setSheetMessage(`Folder "${folder}" already exists.`);
+      return;
+    }
+    const nextFolders = uniqueInOrder([...folders, folder]);
     setFolderFilter(folder);
     setExpandedFolders((current) => {
       const next = new Set(current);
-      const pieces = folder.split("/").map((piece) => piece.trim()).filter(Boolean);
+      const pieces = splitFolderPath(folder);
       pieces.slice(0, -1).reduce((path, piece) => {
         const nextPath = path ? `${path} / ${piece}` : piece;
         next.add(nextPath);
@@ -673,45 +804,77 @@ export function App() {
   }
 
   function renameFolderPath(folder: string, targetParent: string) {
-    const pieces = folder.split("/").map((piece) => piece.trim()).filter(Boolean);
+    const pieces = splitFolderPath(folder);
     const name = pieces[pieces.length - 1] || folder;
-    return !targetParent || targetParent === "All" ? name : `${targetParent} / ${name}`;
+    const parentPath = targetParent === "All" ? "" : normalizeFolderPath(targetParent);
+    return !parentPath ? name : `${parentPath} / ${name}`;
   }
 
   async function moveFolder(folder: string, targetParent: string) {
-    if (folder === targetParent || targetParent.startsWith(`${folder} / `)) return;
+    const sourceFolder = normalizeFolderPath(folder);
+    const parentPath = targetParent === "All" ? "" : normalizeFolderPath(targetParent);
+    if (sourceFolder === parentPath || parentPath.startsWith(`${sourceFolder} / `)) return;
 
-    const nextBasePath = renameFolderPath(folder, targetParent);
+    const movingGroup = getFolderGroup(sourceFolder, folders);
+    const movingSet = new Set(movingGroup);
+    const nextBasePath = renameFolderPath(sourceFolder, parentPath);
+    const hasCollision = folders.some(
+      (existing) => !movingSet.has(existing) && (existing === nextBasePath || existing.startsWith(`${nextBasePath} / `))
+    );
+    if (hasCollision) {
+      setSheetMessage(`A folder named "${nextBasePath}" already exists there.`);
+      return;
+    }
     const rewrite = (path: string) => {
-      if (path === folder) return nextBasePath;
-      if (path.startsWith(`${folder} / `)) return `${nextBasePath}${path.slice(folder.length)}`;
-      return path;
+      const normalized = normalizeFolderPath(path);
+      if (normalized === sourceFolder) return nextBasePath;
+      if (normalized.startsWith(`${sourceFolder} / `)) return `${nextBasePath}${normalized.slice(sourceFolder.length)}`;
+      return normalized;
     };
     const nextParts = parts.map((part) => ({ ...part, folder: rewrite(part.folder || "") }));
-    const nextFolders = Array.from(new Set(folders.map(rewrite))).sort();
+    const rewrittenGroup = uniqueInOrder(movingGroup.map(rewrite));
+    const foldersWithoutMoved = folders.filter((path) => !movingSet.has(path));
+    const parentGroup = parentPath ? getFolderGroup(parentPath, foldersWithoutMoved) : [];
+    const parentIndex = parentPath ? foldersWithoutMoved.indexOf(parentPath) : -1;
+    const insertIndex = parentPath && parentIndex >= 0 ? parentIndex + parentGroup.length : foldersWithoutMoved.length;
+    const nextFolders = uniqueInOrder([
+      ...foldersWithoutMoved.slice(0, insertIndex),
+      ...rewrittenGroup,
+      ...foldersWithoutMoved.slice(insertIndex)
+    ]);
     persist(nextParts, nextFolders);
     setFolderFilter((current) => rewrite(current));
     setExpandedFolders((current) => {
       const next = new Set(Array.from(current).map(rewrite));
-      next.add(targetParent);
+      if (parentPath) next.add(parentPath);
       next.add(nextBasePath);
       return next;
     });
   }
 
   async function movePartToFolder(partId: string, folder: string) {
-    const nextParts = parts.map((part) => (part.id === partId ? { ...part, folder } : part));
+    const nextFolder = normalizeFolderPath(folder);
+    const nextParts = parts.map((part) => (part.id === partId ? { ...part, folder: nextFolder } : part));
     persist(nextParts, folders);
   }
 
   async function renameFolder(path: string) {
     const pieces = splitFolderPath(path);
     const currentName = pieces[pieces.length - 1] || path;
-    const nextName = window.prompt("Rename folder", currentName)?.trim();
+    const nextName = normalizeFolderPath(window.prompt("Rename folder", currentName) || "");
     if (!nextName || nextName === currentName) return;
 
     const parent = getParentFolder(path);
     const nextBasePath = parent === "All" ? nextName : `${parent} / ${nextName}`;
+    const movingGroup = getFolderGroup(path, folders);
+    const movingSet = new Set(movingGroup);
+    const hasCollision = folders.some(
+      (folder) => !movingSet.has(folder) && (folder === nextBasePath || folder.startsWith(`${nextBasePath} / `))
+    );
+    if (hasCollision) {
+      setSheetMessage(`A folder named "${nextBasePath}" already exists.`);
+      return;
+    }
     const rewrite = (folder: string) => {
       if (folder === path) return nextBasePath;
       if (folder.startsWith(`${path} / `)) return `${nextBasePath}${folder.slice(path.length)}`;
@@ -719,7 +882,7 @@ export function App() {
     };
 
     const nextParts = parts.map((part) => ({ ...part, folder: rewrite(part.folder || "") }));
-    const nextFolders = Array.from(new Set(folders.map(rewrite))).sort();
+    const nextFolders = uniqueInOrder(folders.map(rewrite));
     const saved = persist(nextParts, nextFolders);
     if (saved) setFolderFilter((current) => rewrite(current));
   }
@@ -740,9 +903,7 @@ export function App() {
     if (!confirmed) return;
 
     const nextParts = parts.map((part) => ({ ...part, folder: rewrite(part.folder || "") }));
-    const nextFolders = Array.from(
-      new Set(folders.filter((folder) => folder !== path).map(rewrite).filter(Boolean))
-    ).sort();
+    const nextFolders = uniqueInOrder(folders.filter((folder) => folder !== path).map(rewrite).filter(Boolean) as string[]);
     const saved = persist(nextParts, nextFolders);
     if (saved) setFolderFilter(parent);
   }
@@ -767,6 +928,35 @@ export function App() {
 
   function getFolderDirectCount(path: string) {
     return parts.filter((part) => (part.folder || "") === path).length;
+  }
+
+  function getSiblingFolders(path: string) {
+    const parent = getParentFolder(path);
+    if (parent === "All") {
+      return folders.filter((folder) => splitFolderPath(folder).length === 1);
+    }
+    return getDirectChildFolders(parent, folders);
+  }
+
+  function reorderFolder(path: string, direction: -1 | 1) {
+    const siblings = getSiblingFolders(path);
+    const siblingIndex = siblings.indexOf(path);
+    const targetSibling = siblings[siblingIndex + direction];
+    if (!targetSibling) return;
+
+    const movingGroup = getFolderGroup(path, folders);
+    const targetGroup = getFolderGroup(targetSibling, folders);
+    const movingSet = new Set(movingGroup);
+    const withoutMovingGroup = folders.filter((folder) => !movingSet.has(folder));
+    const targetIndex = withoutMovingGroup.indexOf(targetSibling);
+    const insertIndex = direction < 0 ? targetIndex : targetIndex + targetGroup.length;
+    const nextFolders = [
+      ...withoutMovingGroup.slice(0, insertIndex),
+      ...movingGroup,
+      ...withoutMovingGroup.slice(insertIndex)
+    ];
+
+    persist(parts, uniqueInOrder(nextFolders));
   }
 
   function removeProcess(index: number) {
@@ -871,7 +1061,7 @@ export function App() {
           name: record.name ?? "",
           partNumber: record.partNumber ?? "",
           originalPartNumber: record.originalPartNumber || record.partNumber || "",
-        folder: record.folder === "Unfiled" ? "" : record.folder ?? "",
+          folder: record.folder === "Unfiled" ? "" : normalizeFolderPath(record.folder ?? ""),
           quantity: record.quantity ?? "0",
           unitPrice: record.unitPrice ?? "0",
           material,
@@ -914,6 +1104,8 @@ export function App() {
   function renderFolderNode(node: FolderNode, depth = 0) {
     const isExpanded = expandedFolders.has(node.path);
     const hasChildren = node.children.length > 0;
+    const siblings = getSiblingFolders(node.path);
+    const siblingIndex = siblings.indexOf(node.path);
 
     return (
       <div
@@ -951,6 +1143,24 @@ export function App() {
             title="Remove folder"
           >
             <X size={14} />
+          </button>
+          <button
+            className="icon-button folder-order"
+            disabled={siblingIndex <= 0}
+            type="button"
+            onClick={() => reorderFolder(node.path, -1)}
+            title="Move folder up"
+          >
+            ^
+          </button>
+          <button
+            className="icon-button folder-order"
+            disabled={siblingIndex === -1 || siblingIndex >= siblings.length - 1}
+            type="button"
+            onClick={() => reorderFolder(node.path, 1)}
+            title="Move folder down"
+          >
+            v
           </button>
         </div>
         {hasChildren && isExpanded && node.children.map((child) => renderFolderNode(child, depth + 1))}
@@ -1235,7 +1445,7 @@ export function App() {
             onClick={() => setFolderFilter("All")}
           >
             <span>Root</span>
-            <strong>{parts.length}</strong>
+            <strong>{getFolderDirectCount("")}</strong>
           </button>
           <div className="folder-tree">
             {folderTree.map((folder) => renderFolderNode(folder))}

@@ -20,7 +20,7 @@ const HEADERS = [
   'location',
   'notes'
 ];
-const FOLDER_HEADERS = ['path'];
+const FOLDER_HEADERS = ['path', 'order'];
 
 function doGet(e) {
   const result = handleRequest_(e);
@@ -44,7 +44,7 @@ function doPost(e) {
       return json_({ ok: false, error: 'Unsupported action.' });
     }
 
-    writeParts_(payload.parts || []);
+    writeParts_(normalizePartNumbers_(payload.parts || []));
     writeFolders_(payload.folders || []);
     return json_({ ok: true });
   } catch (error) {
@@ -58,10 +58,16 @@ function handleRequest_(e) {
   try {
     const action = e && e.parameter && e.parameter.action;
     if (action === 'replaceAll') {
-      const payload = JSON.parse((e.parameter && e.parameter.payload) || '{}');
-      writeParts_(payload.parts || []);
-      writeFolders_(payload.folders || []);
-      return { ok: true };
+      const lock = LockService.getScriptLock();
+      lock.waitLock(30000);
+      try {
+        const payload = JSON.parse((e.parameter && e.parameter.payload) || '{}');
+        writeParts_(normalizePartNumbers_(payload.parts || []));
+        writeFolders_(payload.folders || []);
+        return { ok: true };
+      } finally {
+        lock.releaseLock();
+      }
     }
 
     if (action !== 'list') return { ok: false, error: 'Unsupported action.' };
@@ -143,13 +149,39 @@ function writeParts_(parts) {
   sheet.getRange(2, 1, rows.length, HEADERS.length).setValues(rows);
 }
 
+function normalizePartNumbers_(parts) {
+  const used = {};
+  let highest = 0;
+
+  parts.forEach(part => {
+    const number = String(part.partNumber || '');
+    const match = number.match(/(\d+)$/);
+    if (match) highest = Math.max(highest, Number(match[1]));
+  });
+
+  return parts.map(part => {
+    let number = String(part.partNumber || '');
+    if (!number || used[number]) {
+      highest += 1;
+      number = `PT-${String(highest).padStart(4, '0')}`;
+      part.partNumber = number;
+      if (!part.originalPartNumber || used[String(part.originalPartNumber)]) {
+        part.originalPartNumber = number;
+      }
+    }
+
+    used[number] = true;
+    return part;
+  });
+}
+
 function readFolders_() {
   const sheet = getFoldersSheet_();
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return [];
 
   return sheet
-    .getRange(2, 1, lastRow - 1, 1)
+    .getRange(2, 1, lastRow - 1, FOLDER_HEADERS.length)
     .getValues()
     .map(row => String(row[0] || '').trim())
     .filter(Boolean);
@@ -162,10 +194,19 @@ function writeFolders_(folders) {
     sheet.getRange(2, 1, lastRow - 1, 1).clearContent();
   }
 
-  const uniqueFolders = Array.from(new Set(folders.map(folder => String(folder || '').trim()).filter(Boolean))).sort();
+  const seen = {};
+  const uniqueFolders = folders
+    .map(folder => String(folder || '').trim())
+    .filter(folder => {
+      if (!folder || seen[folder]) return false;
+      seen[folder] = true;
+      return true;
+    });
   if (!uniqueFolders.length) return;
 
-  sheet.getRange(2, 1, uniqueFolders.length, 1).setValues(uniqueFolders.map(folder => [folder]));
+  sheet
+    .getRange(2, 1, uniqueFolders.length, FOLDER_HEADERS.length)
+    .setValues(uniqueFolders.map((folder, index) => [folder, index]));
 }
 
 function json_(payload) {
