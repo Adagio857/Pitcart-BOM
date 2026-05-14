@@ -142,8 +142,8 @@ function normalizePart(part: LegacyPart): Part {
   return {
     id: part.id || crypto.randomUUID(),
     name: part.name || "",
-    partNumber: part.partNumber || "",
-    originalPartNumber: part.originalPartNumber || part.partNumber || "",
+    partNumber: itemKind === "production" ? part.partNumber || "" : "",
+    originalPartNumber: itemKind === "production" ? part.originalPartNumber || part.partNumber || "" : "",
     folder: part.folder === "Unfiled" ? "" : String(part.folder || "").trim(),
     quantity: Number(part.quantity) || 0,
     unitPrice: Number(part.unitPrice) || 0,
@@ -325,11 +325,45 @@ function readWorkspaceFromSheet(webAppUrl: string): Promise<{ parts: Part[]; fol
 }
 
 async function writeWorkspaceToSheet(webAppUrl: string, parts: Part[], folders: FolderRecord[]) {
-  const result = await callScriptJsonp(webAppUrl, {
-    action: "replaceAll",
-    payload: JSON.stringify({ parts, folders })
+  const session = crypto.randomUUID();
+  const payload = encodeBase64Utf8(JSON.stringify({ parts, folders }));
+  const chunkSize = 1200;
+  const chunks = Array.from({ length: Math.ceil(payload.length / chunkSize) }, (_, index) =>
+    payload.slice(index * chunkSize, (index + 1) * chunkSize)
+  );
+
+  const beginResult = await callScriptJsonp(webAppUrl, {
+    action: "beginSync",
+    session,
+    total: String(chunks.length)
   });
-  if (!result.ok) throw new Error(result.error || "Google Sheet returned an error.");
+  if (!beginResult.ok) throw new Error(beginResult.error || "Google Sheet returned an error.");
+
+  for (const [index, chunk] of chunks.entries()) {
+    const appendResult = await callScriptJsonp(webAppUrl, {
+      action: "appendSync",
+      session,
+      index: String(index),
+      chunk
+    });
+    if (!appendResult.ok) throw new Error(appendResult.error || "Google Sheet returned an error.");
+  }
+
+  const commitResult = await callScriptJsonp(webAppUrl, {
+    action: "commitSync",
+    session,
+    total: String(chunks.length)
+  });
+  if (!commitResult.ok) throw new Error(commitResult.error || "Google Sheet returned an error.");
+}
+
+function encodeBase64Utf8(value: string) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary);
 }
 
 function callScriptJsonp(webAppUrl: string, params: Record<string, string>): Promise<SheetResult> {
@@ -439,7 +473,7 @@ function parseProcessStatus(value?: string): ProcessStatus {
 }
 
 function generateNextPartNumber(parts: Part[]) {
-  const highest = parts.reduce((max, part) => {
+  const highest = parts.filter((part) => part.itemKind === "production").reduce((max, part) => {
     const match = part.originalPartNumber.match(/(\d+)$/) || part.partNumber.match(/(\d+)$/);
     return match ? Math.max(max, Number(match[1])) : max;
   }, 0);
@@ -476,15 +510,18 @@ function reconcileWorkspaceForSync(
   const remoteById = new Map(remoteParts.map((part) => [part.id, part]));
   const localById = new Map(localParts.map((part) => [part.id, part]));
   const mergedParts = remoteParts.filter((part) => !localById.has(part.id));
-  const usedPartNumbers = new Set(mergedParts.map((part) => part.partNumber).filter(Boolean));
+  const usedPartNumbers = new Set(
+    mergedParts.filter((part) => part.itemKind === "production").map((part) => part.partNumber).filter(Boolean)
+  );
   let renumberedCount = 0;
 
   localParts.forEach((part) => {
     const isNewToSheet = !remoteById.has(part.id);
-    const hasCollision = Boolean(part.partNumber && usedPartNumbers.has(part.partNumber));
+    const needsProductionNumber = part.itemKind === "production";
+    const hasCollision = Boolean(needsProductionNumber && part.partNumber && usedPartNumbers.has(part.partNumber));
     let nextPart = part;
 
-    if (!part.partNumber || hasCollision) {
+    if (needsProductionNumber && (!part.partNumber || hasCollision)) {
       const nextNumber = nextAvailablePartNumber(usedPartNumbers);
       nextPart = {
         ...part,
@@ -494,7 +531,7 @@ function reconcileWorkspaceForSync(
       renumberedCount += 1;
     }
 
-    usedPartNumbers.add(nextPart.partNumber);
+    if (nextPart.itemKind === "production") usedPartNumbers.add(nextPart.partNumber);
     mergedParts.push(nextPart);
   });
 
@@ -1208,14 +1245,15 @@ export function App() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const nextItemKind = editingId ? form.itemKind : activeSection;
     const generatedPartNumber = editingId ? originalPartNumber : nextPartNumber;
     const nextPart = formToPart(
       {
         ...form,
-        itemKind: editingId ? form.itemKind : activeSection,
-        linkedBomId: (editingId ? form.itemKind : activeSection) === "production" ? form.linkedBomId : "",
-        partNumber: visiblePartNumber,
-        originalPartNumber: form.originalPartNumber || generatedPartNumber,
+        itemKind: nextItemKind,
+        linkedBomId: nextItemKind === "production" ? form.linkedBomId : "",
+        partNumber: nextItemKind === "production" ? visiblePartNumber : "",
+        originalPartNumber: nextItemKind === "production" ? form.originalPartNumber || generatedPartNumber : "",
         folder: editingId ? form.folder : folderFilter === "All" ? "" : folderFilter
       },
       editingId ?? undefined
@@ -1227,6 +1265,8 @@ export function App() {
       nextPart.processes = [];
       nextPart.drawingUrl = "";
       nextPart.linkedBomId = "";
+      nextPart.partNumber = "";
+      nextPart.originalPartNumber = "";
     }
     const nextParts = editingId
       ? parts.map((part) => (part.id === editingId ? nextPart : part))
@@ -1237,8 +1277,8 @@ export function App() {
       setForm({
         ...emptyForm,
         itemKind: activeSection,
-        partNumber: generateNextPartNumber(nextParts),
-        originalPartNumber: generateNextPartNumber(nextParts)
+        partNumber: activeSection === "production" ? generateNextPartNumber(nextParts) : "",
+        originalPartNumber: activeSection === "production" ? generateNextPartNumber(nextParts) : ""
       });
       setEditingId(null);
     }
@@ -1607,7 +1647,7 @@ export function App() {
           onClick={() => {
             setActiveSection("bom");
             setEditingId(null);
-            setForm({ ...emptyForm, itemKind: "bom", partNumber: nextPartNumber, originalPartNumber: nextPartNumber });
+            setForm({ ...emptyForm, itemKind: "bom", partNumber: "", originalPartNumber: "" });
           }}
         >
           Bill of Materials
@@ -1647,8 +1687,8 @@ export function App() {
                   setForm({
                     ...emptyForm,
                     itemKind: activeSection,
-                    partNumber: nextPartNumber,
-                    originalPartNumber: nextPartNumber
+                    partNumber: activeSection === "production" ? nextPartNumber : "",
+                    originalPartNumber: activeSection === "production" ? nextPartNumber : ""
                   });
                 }}
                 title="Cancel editing"
@@ -1663,24 +1703,26 @@ export function App() {
               {activeSection === "bom" ? "BOM item name" : "Production item name"}
               <input required value={form.name} onChange={(event) => updateForm("name", event.target.value)} />
             </label>
-            <label>
-              Part number
-              <div className="part-number-row">
-                <input
-                  value={visiblePartNumber}
-                  onChange={(event) => updateForm("partNumber", event.target.value)}
-                />
-                <button
-                  className="icon-button"
-                  disabled={!canRevertPartNumber}
-                  type="button"
-                  onClick={revertPartNumber}
-                  title="Revert to original part number"
-                >
-                  <RotateCcw size={15} />
-                </button>
-              </div>
-            </label>
+            {activeSection === "production" && (
+              <label>
+                Part number
+                <div className="part-number-row">
+                  <input
+                    value={visiblePartNumber}
+                    onChange={(event) => updateForm("partNumber", event.target.value)}
+                  />
+                  <button
+                    className="icon-button"
+                    disabled={!canRevertPartNumber}
+                    type="button"
+                    onClick={revertPartNumber}
+                    title="Revert to original part number"
+                  >
+                    <RotateCcw size={15} />
+                  </button>
+                </div>
+              </label>
+            )}
             {activeSection === "bom" ? (
               <>
                 <label>
@@ -1727,7 +1769,7 @@ export function App() {
                     <option value="">No linked BOM item</option>
                     {bomItems.map((item) => (
                       <option key={item.id} value={item.id}>
-                        {item.partNumber ? `${item.partNumber} - ${item.name}` : item.name}
+                        {item.name}
                       </option>
                     ))}
                   </select>
@@ -1973,7 +2015,7 @@ export function App() {
                   <th></th>
                   <th>Name</th>
                   <th>Folder</th>
-                  <th>Part #</th>
+                  {activeSection === "production" && <th>Part #</th>}
                   {activeSection === "bom" ? <th>Material / Stock</th> : <th>Linked BOM Item</th>}
                   {activeSection === "production" && <th>Processes</th>}
                   {activeSection === "production" ? <th>Drawing</th> : (
@@ -2043,7 +2085,7 @@ export function App() {
                       </button>
                     </td>
                     <td>{part.folder ? getFolderDisplayPath(part.folder, folders) || "Unknown folder" : "Root"}</td>
-                    <td>{part.partNumber}</td>
+                    {activeSection === "production" && <td>{part.partNumber}</td>}
                     <td>
                       {activeSection === "bom" ? (
                         <>
@@ -2053,7 +2095,7 @@ export function App() {
                       ) : (
                         <>
                           <div>{bomItems.find((item) => item.id === part.linkedBomId)?.name || "No BOM link"}</div>
-                          <small>{bomItems.find((item) => item.id === part.linkedBomId)?.partNumber || ""}</small>
+                          <small>{bomItems.find((item) => item.id === part.linkedBomId)?.material || ""}</small>
                         </>
                       )}
                     </td>

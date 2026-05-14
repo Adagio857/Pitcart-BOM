@@ -59,6 +59,24 @@ function doPost(e) {
 function handleRequest_(e) {
   try {
     const action = e && e.parameter && e.parameter.action;
+    if (action === 'beginSync') {
+      return beginSync_(e.parameter);
+    }
+
+    if (action === 'appendSync') {
+      return appendSync_(e.parameter);
+    }
+
+    if (action === 'commitSync') {
+      const lock = LockService.getScriptLock();
+      lock.waitLock(30000);
+      try {
+        return commitSync_(e.parameter);
+      } finally {
+        lock.releaseLock();
+      }
+    }
+
     if (action === 'replaceAll') {
       const lock = LockService.getScriptLock();
       lock.waitLock(30000);
@@ -77,6 +95,54 @@ function handleRequest_(e) {
   } catch (error) {
     return { ok: false, error: String(error) };
   }
+}
+
+function beginSync_(parameter) {
+  const session = String(parameter.session || '').trim();
+  const total = Number(parameter.total || 0);
+  if (!session || total < 1) return { ok: false, error: 'Invalid sync session.' };
+
+  const cache = CacheService.getScriptCache();
+  cache.put(`sync:${session}:total`, String(total), 600);
+  return { ok: true };
+}
+
+function appendSync_(parameter) {
+  const session = String(parameter.session || '').trim();
+  const index = Number(parameter.index);
+  const chunk = String(parameter.chunk || '');
+  if (!session || !Number.isInteger(index) || index < 0 || !chunk) {
+    return { ok: false, error: 'Invalid sync chunk.' };
+  }
+
+  CacheService.getScriptCache().put(`sync:${session}:${index}`, chunk, 600);
+  return { ok: true };
+}
+
+function commitSync_(parameter) {
+  const session = String(parameter.session || '').trim();
+  const total = Number(parameter.total || 0);
+  if (!session || total < 1) return { ok: false, error: 'Invalid sync commit.' };
+
+  const cache = CacheService.getScriptCache();
+  const cachedTotal = Number(cache.get(`sync:${session}:total`) || 0);
+  if (cachedTotal !== total) return { ok: false, error: 'Sync session expired. Try syncing again.' };
+
+  let encoded = '';
+  for (let index = 0; index < total; index += 1) {
+    const chunk = cache.get(`sync:${session}:${index}`);
+    if (!chunk) return { ok: false, error: `Missing sync chunk ${index + 1} of ${total}. Try syncing again.` };
+    encoded += chunk;
+  }
+
+  const payload = JSON.parse(decodeBase64Utf8_(encoded));
+  writeParts_(normalizePartNumbers_(payload.parts || []));
+  writeFolders_(payload.folders || []);
+  return { ok: true };
+}
+
+function decodeBase64Utf8_(value) {
+  return Utilities.newBlob(Utilities.base64Decode(value)).getDataAsString();
 }
 
 function getFoldersSheet_() {
@@ -156,12 +222,19 @@ function normalizePartNumbers_(parts) {
   let highest = 0;
 
   parts.forEach(part => {
+    if (part.itemKind !== 'production') return;
     const number = String(part.partNumber || '');
     const match = number.match(/(\d+)$/);
     if (match) highest = Math.max(highest, Number(match[1]));
   });
 
   return parts.map(part => {
+    if (part.itemKind !== 'production') {
+      part.partNumber = '';
+      part.originalPartNumber = '';
+      return part;
+    }
+
     let number = String(part.partNumber || '');
     if (!number || used[number]) {
       highest += 1;

@@ -1,0 +1,78 @@
+id,name,partNumber,originalPartNumber,folder,quantity,unitPrice,material,thickness,processes,drawingUrl,vendor,location,notes,itemKind,linkedBomId
+93214011-c9dc-424a-9cb0-c01ff1c3ca96,"12""x24"" 1/4"" Carbon Steel Plate",PT-0013,PT-0013,Shared Parts,1,38.39,"1/4"" Carbon Steel Plate",Steel Plate,Unassigned:Not Started,,https://www.onlinemetals.com/en/buy/carbon-steel/1-x-0-065-carbon-steel-square-tube-a500-a513-hot-rolled/pid/10301,Online Metals,,bom,
+2a169db5-20c1-43d6-9ecb-8a72e8854c31,"96""1"" x 0.065"" Carbon Steel Square Tube ",PT-0012,PT-0012,Upper Assembly,5,16.97,"1"" x 0.065"" Carbon Steel Square Tube ",Steel Tubing,Unassigned:Not Started,,https://www.onlinemetals.com/en/buy/carbon-steel/1-x-0-065-carbon-steel-square-tube-a500-a513-hot-rolled/pid/10301,Online Metals,,bom,
+a5c287fa-2bf0-447e-be6b-e66f200e76a6,"72"" 1 1/2"" x 0.065"" Carbon Steel Square Tube",PT-0011,PT-0011,Upper Assembly,4,36.28,"1 1/2"" x 0.065"" Carbon Steel Square Tube",Steel Tubing,Unassigned:Not Started,,https://www.onlinemetals.com/en/buy/carbon-steel/1-5-x-0-065-carbon-steel-square-tube-a500-a513-hot-rolled/pid/10322,Online Metals,,bom,
+6259cc73-e472-4949-83c2-344a1d29b8ad,"96"" 2"" x 0.12"" Carbon Steel Square Tube",PT-0010,PT-0010,Lower Assembly,7,63.33,"2"" x 0.12"" Carbon Steel Square Tube",Steel Tubing,Unassigned:Not Started,,https://www.onlinemetals.com/en/buy/carbon-steel/2-x-0-12-carbon-steel-square-tube-a500-a513-hot-rolled/pid/10343,Online Metals,,bom,
+1e68ce2b-2ab7-439b-a411-85766f360006,Panel Plugs 10 count,PT-0009,PT-0009,Shared Parts,1,5.67,"Sealing, for 7/8"" ID and 0.063"" to 0.25"" Panel Thickness",Panel Plug,Unassigned:Not Started,,https://www.mcmaster.com/9750K92/,McMaster,,bom,
+38808456-d3dd-485b-8262-07ff0d96b935,Polyethylene Square Plug 20 count,PT-0008,PT-0008,Shared Parts,1,20.72,"Snap-in, for 1.74"" to 1.83"" Inside Square",Tube Plug,Unassigned:Not Started,,https://www.mcmaster.com/9565K38/,McMaster,,bom,
+462bfa67-4a1c-4544-8728-e9d9adbadda0,Polyethylene Square Plug 25 Count,PT-0007,PT-0007,Shared Parts,1,11.46,"Snap-in, for 1.21"" to 1.3"" Inside Square",Tube Plug,Unassigned:Not Started,,https://www.mcmaster.com/9565K21/,McMaster,,bom,
+01feb02b-9fd3-415c-9627-28a4f853a110,Low-Profile Raceway,PT-0006,PT-0006,Upper Assembly,1,15.33,"7/8"" Wide x 7/16"" Deep PVC",Raceway,Unassigned:Not Started,,https://www.mcmaster.com/70075K21/,McMaster,"
+Shape
+Straight
+
+Component
+Raceway
+
+Width
+7/8""
+
+Depth
+7/16""
+
+Length
+5 ft.
+
+Cover Style
+Snap On
+
+Material
+PVC
+
+Color
+Ivory
+
+Mounting Fasteners Included
+No
+
+Features
+Paintable Surface
+
+Voltage Rating
+600V AC
+600V DC",bom,
+c17962f0-d2fc-4a0c-8aff-26d046c9cea4,ClearView Latch Box,PT-0005,PT-0005,Upper Assembly,21,0,Sterilite ,Organizational Boxes,Unassigned:Not Started,,https://www.amazon.com/Sterilite-17531712-ClearView-Latches-12-Pack/dp/B0042FS96G/ref=sr_1_2?crid=X0W3EDM6VS89&dib=eyJ2IjoiMSJ9.I5XxplH6dn8NebSV7QQHYQJRTGOro1VdUsmdxDwh3_Ct53NT7z9VnMjg_Eyc8a-f7gh23_3D4RdTVe3MFsJDACYOuRJCRVQZJNq8WspQgEw7vhF2o74euB-OgfcKnUbkpjpQSJ6I3ta_UdZnFRmYiXxqzrEm_BBm9EhHD7Z9NVM3f-9_ii0nUQ7E_wY6om6uEZK8FWeSls-K14WHP37rcrtcyQaEUfvup-Ae7Javaxp6hffUZrJxFVuJ8cEKS7GiDuydWwIss-g4K4tj6CQlGp3WItrcRl5z3HPxqdSkKXo.0_iCt4naQpqeo7uHd1f8ErkCLCucjKyZseHn4Z3xjds&dib_tag=se&keywords=15qt%2Bsterilite%2Bstorage%2Bbins%2Bwith%2Blids&qid=1724724369&sprefix=15qt%2Bster%2Caps%2C87&sr=8-2&th=1,Bread Carts - Shop,"Complete Storage Solution: These organizing storage boxes have assembled dimensions of 17"" x 11 1/8"" x 6 1/2"", making them easy to organize and access items stored under beds, in closets, or around your home or office with convenient mobility",bom,
+9790142a-8cd4-41f4-b919-221c80165d94,ECO-WORTHY Heavy Duty 330lbs/1500N Solar Tracker Linear Actuator,PT-0004,PT-0004,Shared Parts,2,44.64, The alloy-steel shaft,Linear Actuator,Unassigned:Not Started,,https://www.amazon.com/ECO-WORTHY-Actuator-Maximum-Electroic-Medical/dp/B00NM8H5SM?th=1,Amazon,"Linear Actuator Multi-Functions with Mounting Brackets (12V, 16"") IP54 Waterproof 400mm Stroke Linear Motion Actuator",bom,
+b0ee4106-27f2-49ad-a315-65b9a53f5321,"Gas Spring 5/16""-18 Thread Size, 35.43"" Extended Length, 100 lbs. Force",PT-0003,PT-0003,Shared Parts,4,39.9,Zinc-Plated Steel,Gas Spring,Unassigned:Not Started,,https://www.mcmaster.com/4138T632/,McMaster,"Length
+1.2""
+
+Thread Length
+0.55""
+
+Thread Size
+5/16""-18
+
+Diameter
+10 mm
+
+Material
+Zinc-Plated Steel
+
+Extended Length
+35.43""
+
+Compressed Length
+19.29""
+
+Stroke Length
+16.14""
+
+Compression Force
+136 lbf
+
+Maximum Cycles per Minute
+6 cpm
+
+Maximum Cycles
+25,000",bom,
+62f0c5e4-5860-4d10-8554-0ed07aedbac5,Husky,PT-0002,PT-0002,Lower Assembly,1,0,61x24x39,Tool Chest,Unassigned:Not Started,,Husky,Main Bay,Large toolchest used for storage,bom,
+ac591bdd-6f1f-4492-8697-17aa859d1633,Battery Cart,PT-0001,PT-0001,Lower Assembly,1,0,,,Unassigned:Not Started,,,Main Bay,Battery cart with 12 batteries and storage space,bom,
