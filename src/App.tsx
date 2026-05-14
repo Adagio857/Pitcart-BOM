@@ -337,7 +337,17 @@ async function writeWorkspaceToSheet(webAppUrl: string, parts: Part[], folders: 
     session,
     total: String(chunks.length)
   });
-  if (!beginResult.ok) throw new Error(beginResult.error || "Google Sheet returned an error.");
+  if (!beginResult.ok) {
+    if (beginResult.error === "Unsupported action.") {
+      const legacyResult = await callScriptJsonp(webAppUrl, {
+        action: "replaceAll",
+        payload: JSON.stringify({ parts, folders })
+      });
+      if (!legacyResult.ok) throw new Error(legacyResult.error || "Google Sheet returned an error.");
+      return;
+    }
+    throw new Error(beginResult.error || "Google Sheet returned an error.");
+  }
 
   for (const [index, chunk] of chunks.entries()) {
     const appendResult = await callScriptJsonp(webAppUrl, {
