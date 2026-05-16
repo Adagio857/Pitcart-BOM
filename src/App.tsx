@@ -1983,31 +1983,27 @@ export function App() {
                       onDrop={(event) => handleFolderDrop(event, folder.id, draggingFolder ? getFolderDropPosition(event) : "inside")}
                       onDragEnd={clearDragState}
                     >
-                      <td></td>
-                      <td style={{ paddingLeft: `${12 + depth * 22}px` }}>
-                        <button className="part-name folder-name" type="button">
-                          <span><Folder size={15} /> {folder.name}</span>
-                          <small>{getFolderDirectCount(folder.id)} direct item(s)</small>
-                        </button>
+                      <td colSpan={2}>
+                        <div className="tree-cell" style={{ "--tree-depth": depth } as CSSProperties}>
+                          <span className="tree-guides" aria-hidden="true" />
+                          <button
+                            className="icon-button folder-expand-button"
+                            disabled={!hasChildren}
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              toggleFolderExpanded(folder.id);
+                            }}
+                            title={isExpanded ? "Collapse folder" : "Expand folder"}
+                          >
+                            {isExpanded ? "v" : ">"}
+                          </button>
+                          <button className="part-name folder-name" type="button">
+                            <span><Folder size={15} /> {folder.name}</span>
+                          </button>
+                        </div>
                       </td>
-                      <td>Folder</td>
-                      <td colSpan={tableColumnCount - 4}>
-                        {getFolderDisplayPath(folder.id, activeFolders)}
-                      </td>
-                      <td>
-                        <button
-                          className="icon-button folder-expand-button"
-                          disabled={!hasChildren}
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            toggleFolderExpanded(folder.id);
-                          }}
-                          title={isExpanded ? "Collapse folder" : "Expand folder"}
-                        >
-                          {isExpanded ? "v" : ">"}
-                        </button>
-                      </td>
+                      <td colSpan={tableColumnCount - 2}></td>
                     </tr>
                   );
                   }
@@ -2055,15 +2051,19 @@ export function App() {
                         readOnly
                       />
                     </td>
-                    <td style={{ paddingLeft: `${12 + depth * 22}px` }}>
-                      <button className="part-name" type="button" onClick={() => editPart(part)}>
-                        <span>{part.name}</span>
-                        <small>
-                          {activeSection === "bom"
-                            ? `${part.vendor || "No vendor"} - ${part.location || "No location"}`
-                            : part.drawingUrl ? "Drawing linked" : "No drawing"}
-                        </small>
-                      </button>
+                    <td>
+                      <div className="tree-cell" style={{ "--tree-depth": depth } as CSSProperties}>
+                        <span className="tree-guides" aria-hidden="true" />
+                        <span className="tree-spacer" />
+                        <button className="part-name" type="button" onClick={() => editPart(part)}>
+                          <span>{part.name}</span>
+                          <small>
+                            {activeSection === "bom"
+                              ? `${part.vendor || "No vendor"} - ${part.location || "No location"}`
+                              : part.drawingUrl ? "Drawing linked" : "No drawing"}
+                          </small>
+                        </button>
+                      </div>
                     </td>
                     <td>{part.folder ? getFolderDisplayPath(part.folder, folders) || "Unknown folder" : "Root"}</td>
                     {activeSection === "production" && <td>{part.partNumber}</td>}
