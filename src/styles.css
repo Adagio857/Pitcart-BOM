@@ -244,16 +244,39 @@ h2 {
 }
 
 .workspace {
-  display: grid;
-  grid-template-columns: minmax(300px, 24vw) minmax(220px, 16vw) minmax(520px, 1fr);
+  display: flex;
   gap: 14px;
-  align-items: start;
+  align-items: stretch;
+  width: 100%;
+  min-height: 640px;
+  overflow: auto;
 }
 
 .editor-panel,
 .folder-panel,
 .library-panel {
   border-radius: 8px;
+  min-height: 420px;
+  max-width: 100%;
+  resize: horizontal;
+  overflow: auto;
+  scrollbar-color: rgba(126, 154, 153, 0.28) rgba(3, 10, 13, 0.28);
+}
+
+.editor-panel {
+  flex: 0 0 clamp(320px, 24vw, 520px);
+  min-width: 300px;
+}
+
+.folder-panel {
+  flex: 0 0 clamp(220px, 16vw, 360px);
+  min-width: 210px;
+}
+
+.library-panel {
+  flex: 1 1 680px;
+  min-width: 480px;
+  resize: both;
 }
 
 .editor-panel,
@@ -421,12 +444,9 @@ textarea:focus {
   font-weight: 700;
 }
 
-.library-panel {
-  overflow: hidden;
-}
-
 .folder-panel {
   display: grid;
+  align-content: start;
   gap: 8px;
 }
 
@@ -833,14 +853,28 @@ td small {
   }
 
   .hero,
-  .toolbar,
-  .workspace {
+  .toolbar {
     display: grid;
   }
 
-  .workspace,
   .stats-grid {
     grid-template-columns: 1fr;
+  }
+
+  .workspace {
+    display: grid;
+    grid-template-columns: 1fr;
+    min-height: auto;
+    overflow: visible;
+  }
+
+  .editor-panel,
+  .folder-panel,
+  .library-panel {
+    width: 100%;
+    min-width: 0;
+    min-height: auto;
+    resize: vertical;
   }
 
   .hero-actions {

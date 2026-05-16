@@ -1837,13 +1837,13 @@ export function App() {
 
         <aside className="folder-panel">
           <div className="panel-heading">
-            <button className="icon-button" type="button" onClick={() => void createFolder()} title="New folder">
-              <Plus size={15} />
-            </button>
             <div>
               <p className="eyebrow">Folders</p>
               <h2>Organize</h2>
             </div>
+            <button className="icon-button" type="button" onClick={() => void createFolder()} title="New folder">
+              <Plus size={15} />
+            </button>
           </div>
           <button
             className={[
