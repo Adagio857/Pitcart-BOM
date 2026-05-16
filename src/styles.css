@@ -772,7 +772,7 @@ tbody td {
   white-space: nowrap;
 }
 
-tbody td > div:not(.row-actions):not(.process-chips),
+tbody td > div:not(.row-actions):not(.process-chips):not(.tree-cell),
 tbody td small {
   display: block;
   min-width: 0;
@@ -823,6 +823,10 @@ tbody tr.folder-list-row:hover {
   width: 100%;
   height: 56px;
   max-height: 56px;
+}
+
+tbody td > .tree-cell {
+  display: grid;
 }
 
 .tree-select-slot {
