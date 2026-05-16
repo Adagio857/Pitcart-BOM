@@ -187,13 +187,6 @@ h2 {
   border-radius: 8px;
 }
 
-.sheet-form {
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) 132px;
-  gap: 10px;
-  align-items: end;
-}
-
 .sheet-connection {
   display: flex;
   align-items: center;
@@ -230,16 +223,6 @@ h2 {
   font-size: var(--text-sm);
   font-weight: 500;
   text-align: right;
-}
-
-.sheet-status a {
-  color: #69ead7;
-  font-weight: 700;
-}
-
-.sheet-status a[aria-disabled="true"] {
-  color: #7e9a99;
-  pointer-events: none;
 }
 
 .stats-grid span {
@@ -925,7 +908,6 @@ td small {
 
   .hero,
   .sheet-panel,
-  .sheet-form,
   .toolbar,
   .workspace {
     display: grid;
@@ -933,7 +915,6 @@ td small {
 
   .workspace,
   .sheet-panel,
-  .sheet-form,
   .stats-grid {
     grid-template-columns: 1fr;
   }

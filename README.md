@@ -39,12 +39,11 @@ This project can be hosted as a static GitHub Pages site.
 
 The workflow builds the app with `VITE_BASE_PATH` set to `/<repo-name>/`, which is the path GitHub Pages uses for project sites.
 
-To bake the Apps Script URL and Sheet URL into the deployed app, add GitHub repository variables:
+To bake the Apps Script URL into the deployed app, add this GitHub repository variable:
 
 - `VITE_APPS_SCRIPT_URL`
-- `VITE_GOOGLE_SHEET_URL`
 
-When those values are configured, the app connects to the Google Sheet automatically on load. The manual connection form only appears for an unconfigured local copy.
+When that value is configured, the app connects to the Google Sheet automatically on load. The Sheet URL is not exposed in the application UI.
 
 ## Google Sheet Setup
 
@@ -57,8 +56,7 @@ When those values are configured, the app connects to the Google Sheet automatic
 7. Set **Who has access** to **Anyone**. This is needed because the local app writes to the web app without Google OAuth.
 8. Deploy and copy the `/exec` web app URL.
 9. Add that `/exec` URL to `.env.local` for local development or to the GitHub repository variable `VITE_APPS_SCRIPT_URL` for Pages.
-10. Add your Google Sheet URL to `.env.local` or to `VITE_GOOGLE_SHEET_URL`.
-11. Reload the app. It will show the Google Sheet as connected without asking for the Apps Script link again.
+10. Reload the app. It will use the configured Apps Script URL without showing Sheet URL inputs or links.
 
 The script creates/uses a `Parts` tab for part rows and a `Folders` tab for folder-only organization paths.
 
