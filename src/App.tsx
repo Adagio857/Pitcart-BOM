@@ -1254,6 +1254,7 @@ export function App() {
   }
 
   function getFolderDirectCount(folderId: string) {
+    if (!folderId) return sectionItems.length;
     return parts.filter((part) => part.itemKind === activeSection && (part.folder || "") === folderId).length;
   }
 
