@@ -90,6 +90,7 @@ type FolderContextMenu = {
 
 const WORKSPACE_CACHE_KEY = "parts-tracker.workspaceCache.v1";
 const SYNC_INTERVAL_MS = 30000;
+const SYNC_CHUNK_SIZE = 6000;
 const SHARED_APPS_SCRIPT_URL =
   "https://script.google.com/macros/s/AKfycbwecDDPCzEjK5aEoZrKAD0g-ZvTubCrsaNjjhA-MXA1DcCQq4ey7jQgx5lVaDQPN4IP/exec";
 const DEFAULT_APPS_SCRIPT_URL = import.meta.env.VITE_APPS_SCRIPT_URL || SHARED_APPS_SCRIPT_URL;
@@ -429,7 +430,7 @@ function readWorkspaceFromSheet(webAppUrl: string): Promise<{ parts: Part[]; fol
 async function writeWorkspaceToSheet(webAppUrl: string, parts: Part[], folders: FolderRecord[]) {
   const session = crypto.randomUUID();
   const payload = encodeBase64Utf8(JSON.stringify({ parts, folders }));
-  const chunkSize = 1200;
+  const chunkSize = SYNC_CHUNK_SIZE;
   const chunks = Array.from({ length: Math.ceil(payload.length / chunkSize) }, (_, index) =>
     payload.slice(index * chunkSize, (index + 1) * chunkSize)
   );
@@ -791,6 +792,7 @@ export function App() {
   const sheetWebAppUrl = DEFAULT_APPS_SCRIPT_URL;
   const [isSheetLoading, setIsSheetLoading] = useState(false);
   const [hasPendingSync, setHasPendingSync] = useState(cachedWorkspace.dirty);
+  const [syncRetryBlocked, setSyncRetryBlocked] = useState(false);
   const [deletedPartIds, setDeletedPartIds] = useState<string[]>(cachedWorkspace.deletedPartIds);
   const [sheetMessage, setSheetMessage] = useState(
     cachedWorkspace.parts.length
@@ -826,14 +828,14 @@ export function App() {
   }, [sheetWebAppUrl]);
 
   useEffect(() => {
-    if (!sheetWebAppUrl || !hasPendingSync || isSheetLoading) return;
+    if (!sheetWebAppUrl || !hasPendingSync || isSheetLoading || syncRetryBlocked) return;
 
     const timer = window.setTimeout(() => {
       void syncToSheet();
     }, SYNC_INTERVAL_MS);
 
     return () => window.clearTimeout(timer);
-  }, [deletedPartIds, folderRecords, hasPendingSync, isSheetLoading, parts, sheetWebAppUrl]);
+  }, [deletedPartIds, folderRecords, hasPendingSync, isSheetLoading, parts, sheetWebAppUrl, syncRetryBlocked]);
 
   async function refreshFromSheet(url = sheetWebAppUrl) {
     if (!url) {
@@ -853,6 +855,7 @@ export function App() {
       setDeletedPartIds([]);
       saveWorkspaceCache(nextParts, nextFolders, false);
       setHasPendingSync(false);
+      setSyncRetryBlocked(false);
       setSelected(new Set());
       setPreviewPartId((current) => (nextParts.some((part) => part.id === current) ? current : null));
       setSheetMessage(`Loaded ${nextParts.length} parts from the Google Sheet.`);
@@ -868,6 +871,7 @@ export function App() {
     setFolderRecords(nextFolders);
     setDeletedPartIds(nextDeletedPartIds);
     setHasPendingSync(true);
+    setSyncRetryBlocked(false);
     saveWorkspaceCache(nextParts, nextFolders, true, nextDeletedPartIds);
     setSheetMessage(sheetWebAppUrl ? "Saved locally. Google Sheet sync pending." : "Saved locally. Sheet sync is not configured.");
     return true;
@@ -898,6 +902,7 @@ export function App() {
       setDeletedPartIds([]);
       saveWorkspaceCache(reconciled.parts, reconciled.folders, false);
       setHasPendingSync(false);
+      setSyncRetryBlocked(false);
       setSheetMessage(
         reconciled.renumberedCount
           ? `Synced ${reconciled.parts.length} parts. Renumbered ${reconciled.renumberedCount} conflicting part(s).`
@@ -905,6 +910,7 @@ export function App() {
       );
       return true;
     } catch (error) {
+      setSyncRetryBlocked(true);
       setSheetMessage(error instanceof Error ? error.message : "Could not save to Google Sheet.");
       return false;
     } finally {
@@ -1754,7 +1760,10 @@ export function App() {
             className="button secondary"
             disabled={isSheetLoading || !sheetWebAppUrl || !hasPendingSync}
             type="button"
-            onClick={() => void syncToSheet()}
+            onClick={() => {
+              setSyncRetryBlocked(false);
+              void syncToSheet();
+            }}
             title="Push local changes to Google Sheet"
           >
             <RefreshCw size={16} />
