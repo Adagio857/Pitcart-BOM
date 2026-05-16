@@ -74,6 +74,12 @@ type PartDropIndicator = {
   position: "before" | "after";
 };
 
+type FolderContextMenu = {
+  folderId: string;
+  x: number;
+  y: number;
+};
+
 const WORKSPACE_CACHE_KEY = "parts-tracker.workspaceCache.v1";
 const SYNC_INTERVAL_MS = 30000;
 const SHARED_APPS_SCRIPT_URL =
@@ -634,11 +640,6 @@ function getParentFolder(folderId: string, folders: FolderRecord[]) {
   return folder?.parentId || "All";
 }
 
-function getDirectChildFolders(currentFolder: string, folders: FolderRecord[]) {
-  const parentId = currentFolder === "All" ? "" : currentFolder;
-  return folders.filter((folder) => folder.parentId === parentId);
-}
-
 function getFolderDescendantIds(folderId: string, folders: FolderRecord[]) {
   const descendants = new Set<string>();
   let changed = true;
@@ -729,6 +730,7 @@ export function App() {
   const [dragPosition, setDragPosition] = useState({ x: 0, y: 0 });
   const [folderDropIndicator, setFolderDropIndicator] = useState<FolderDropIndicator | null>(null);
   const [partDropIndicator, setPartDropIndicator] = useState<PartDropIndicator | null>(null);
+  const [folderContextMenu, setFolderContextMenu] = useState<FolderContextMenu | null>(null);
   const [previewPartId, setPreviewPartId] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [lastSelectedPartId, setLastSelectedPartId] = useState<string | null>(null);
@@ -837,21 +839,6 @@ export function App() {
 
   const folders = useMemo(() => uniqueFoldersById(folderRecords), [folderRecords]);
   const folderTree = useMemo(() => buildFolderTree(folders, sectionItems), [folders, sectionItems]);
-  const childFolders = useMemo(() => getDirectChildFolders(folderFilter, folders), [folderFilter, folders]);
-  const breadcrumbFolders = useMemo(() => {
-    if (folderFilter === "All") return [];
-    const byId = new Map(folders.map((folder) => [folder.id, folder]));
-    const breadcrumbs: { name: string; id: string }[] = [];
-    let current = byId.get(folderFilter);
-    const seen = new Set<string>();
-    while (current && !seen.has(current.id)) {
-      seen.add(current.id);
-      breadcrumbs.unshift({ name: current.name, id: current.id });
-      current = current.parentId ? byId.get(current.parentId) : undefined;
-    }
-    return breadcrumbs;
-  }, [folderFilter, folders]);
-
   useEffect(() => {
     if (folderFilter !== "All" && !folders.some((folder) => folder.id === folderFilter)) {
       setFolderFilter("All");
@@ -1214,6 +1201,16 @@ export function App() {
     return parts.filter((part) => part.itemKind === activeSection && (part.folder || "") === folderId).length;
   }
 
+  function openFolderContextMenu(event: MouseEvent<HTMLElement>, folderId: string) {
+    event.preventDefault();
+    event.stopPropagation();
+    setFolderContextMenu({ folderId, x: event.clientX, y: event.clientY });
+  }
+
+  function closeFolderContextMenu() {
+    setFolderContextMenu(null);
+  }
+
   function removeProcess(index: number) {
     setForm((current) => ({
       ...current,
@@ -1471,6 +1468,7 @@ export function App() {
           onDragOver={(event) => updateFolderDragIndicator(event, node.id)}
           onDrop={(event) => handleFolderDrop(event, node.id, draggingFolder ? getFolderDropPosition(event) : "inside")}
           onDragEnd={clearDragState}
+          onContextMenu={(event) => openFolderContextMenu(event, node.id)}
           style={{ paddingLeft: `${depth * 14}px` }}
         >
           <button
@@ -1497,17 +1495,6 @@ export function App() {
             <span>{node.name}</span>
             <strong>{node.totalCount}</strong>
           </button>
-          <button
-            className="icon-button folder-remove"
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              void removeFolder(node.id);
-            }}
-            title="Remove folder"
-          >
-            <X size={14} />
-          </button>
         </div>
         {hasChildren && isExpanded && node.children.map((child) => renderFolderNode(child, depth + 1))}
       </div>
@@ -1515,7 +1502,7 @@ export function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main className="app-shell" onClick={closeFolderContextMenu}>
       {draggingFolder && (
         <div className="folder-drag-ghost" style={{ left: dragPosition.x + 12, top: dragPosition.y + 12 }}>
           <Folder size={15} />
@@ -1532,12 +1519,52 @@ export function App() {
           </span>
         </div>
       )}
+      {folderContextMenu && (
+        <div
+          className="context-menu"
+          style={{ left: folderContextMenu.x, top: folderContextMenu.y }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              void renameFolder(folderContextMenu.folderId);
+              closeFolderContextMenu();
+            }}
+          >
+            Rename
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              void unpackFolder(folderContextMenu.folderId);
+              closeFolderContextMenu();
+            }}
+          >
+            Unpack
+          </button>
+          <button
+            className="danger"
+            type="button"
+            onClick={() => {
+              void removeFolder(folderContextMenu.folderId);
+              closeFolderContextMenu();
+            }}
+          >
+            Delete
+          </button>
+        </div>
+      )}
       <section className="hero">
         <div>
           <p className="eyebrow">Google Sheet workspace</p>
           <h1>Parts Library</h1>
         </div>
         <div className="hero-actions">
+          <div className="sync-summary">
+            <strong>{hasPendingSync ? "Unsynced" : isSheetLoading ? "Syncing" : "Synced"}</strong>
+            <span>{sheetMessage}</span>
+          </div>
           <button
             className="button secondary"
             disabled={isSheetLoading || !sheetWebAppUrl}
@@ -1571,19 +1598,6 @@ export function App() {
             <ArrowDownToLine size={16} />
             Download CSV
           </button>
-        </div>
-      </section>
-
-      <section className="sheet-panel">
-        <div className="sheet-connection">
-          <Database size={18} />
-          <div>
-            <strong>{sheetWebAppUrl ? "Google Sheet sync configured" : "Google Sheet sync missing"}</strong>
-            <span>{sheetWebAppUrl ? "Data sync runs through the app." : "Set VITE_APPS_SCRIPT_URL in the app configuration."}</span>
-          </div>
-        </div>
-        <div className="sheet-status">
-          <span>{hasPendingSync ? "Unsynced local changes" : "Synced"} - {sheetMessage}</span>
         </div>
       </section>
 
@@ -1823,6 +1837,9 @@ export function App() {
 
         <aside className="folder-panel">
           <div className="panel-heading">
+            <button className="icon-button" type="button" onClick={() => void createFolder()} title="New folder">
+              <Plus size={15} />
+            </button>
             <div>
               <p className="eyebrow">Folders</p>
               <h2>Organize</h2>
@@ -1877,84 +1894,6 @@ export function App() {
                 ))}
               </select>
             </div>}
-          </div>
-
-          <div
-            className="folder-browser"
-            onDragOver={(event) => event.preventDefault()}
-            onDrop={(event) => handleFolderDrop(event, folderFilter)}
-          >
-            <div className="folder-command-row">
-              <button className="mini-button" type="button" onClick={() => void createFolder()}>
-                <Plus size={14} />
-                New Folder
-              </button>
-              {folderFilter !== "All" && (
-                <>
-                  <button className="mini-button" type="button" onClick={() => void renameFolder(folderFilter)}>
-                    Rename
-                  </button>
-                  <button className="mini-button" type="button" onClick={() => void unpackFolder(folderFilter)}>
-                    Unpack
-                  </button>
-                  <button className="mini-button danger-text" type="button" onClick={() => void removeFolder(folderFilter)}>
-                    Delete
-                  </button>
-                </>
-              )}
-            </div>
-            <div className="breadcrumb-row">
-              <button className="breadcrumb" type="button" onClick={() => setFolderFilter("All")}>
-                Root
-              </button>
-              {breadcrumbFolders.map((folder) => (
-                <button
-                  className="breadcrumb"
-                  key={folder.id}
-                  type="button"
-                  onClick={() => setFolderFilter(folder.id)}
-                >
-                  / {folder.name}
-                </button>
-              ))}
-            </div>
-
-            {folderFilter !== "All" && (
-              <button
-                className="folder-tile parent-folder"
-                type="button"
-                onClick={() => setFolderFilter(getParentFolder(folderFilter, folders))}
-              >
-                <span>..</span>
-                <small>Parent folder</small>
-              </button>
-            )}
-
-            <div className="folder-tile-grid">
-              {childFolders.map((folder) => {
-                return (
-                  <div
-                    className="folder-tile"
-                    draggable
-                    key={folder.id}
-                    onClick={() => setFolderFilter(folder.id)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") setFolderFilter(folder.id);
-                    }}
-                    onDragOver={(event) => event.preventDefault()}
-                    onDragStart={(event) => {
-                      event.dataTransfer.setData("application/json", JSON.stringify({ type: "folder", path: folder.id }));
-                    }}
-                    onDrop={(event) => handleFolderDrop(event, folder.id)}
-                    role="button"
-                    tabIndex={0}
-                  >
-                    <span>{folder.name}</span>
-                    <small>{getFolderDirectCount(folder.id)} direct part(s)</small>
-                  </div>
-                );
-              })}
-            </div>
           </div>
 
           <div className="table-heading">
