@@ -628,52 +628,6 @@ function getRelevantFolders(folders: FolderRecord[], sectionItems: Part[], itemK
   return folders.filter((folder) => relevantIds.has(folder.id));
 }
 
-type FolderNode = {
-  id: string;
-  name: string;
-  parentId: string;
-  path: string;
-  count: number;
-  totalCount: number;
-  children: FolderNode[];
-};
-
-function buildFolderTree(folders: FolderRecord[], parts: Part[]) {
-  const nodes = new Map<string, FolderNode>();
-  const root: FolderNode[] = [];
-
-  folders.forEach((folder) => {
-    nodes.set(folder.id, {
-      ...folder,
-      path: getFolderDisplayPath(folder.id, folders),
-      count: parts.filter((part) => part.folder === folder.id).length,
-      totalCount: 0,
-      children: []
-    });
-  });
-
-  folders.forEach((folder) => {
-    const node = nodes.get(folder.id);
-    if (!node) return;
-    const parent = folder.parentId ? nodes.get(folder.parentId) : null;
-    if (parent) parent.children.push(node);
-    else root.push(node);
-  });
-
-  function finalize(nodes: FolderNode[]): FolderNode[] {
-    return nodes.map((node) => {
-      const children = finalize(node.children);
-      return {
-        ...node,
-        children,
-        totalCount: node.count + children.reduce((sum, child) => sum + child.totalCount, 0)
-      };
-    });
-  }
-
-  return finalize(root);
-}
-
 function splitFolderPath(path: string) {
   return path.split("/").map((piece) => piece.trim()).filter(Boolean);
 }
@@ -772,7 +726,6 @@ export function App() {
   const [statusFilter, setStatusFilter] = useState<"All" | ProcessStatus>("All");
   const [processFilter, setProcessFilter] = useState("All");
   const [processDraft, setProcessDraft] = useState<ProcessStep>({ name: "", status: "Not Started" });
-  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set(["Subsystem", "Material"]));
   const [draggingFolder, setDraggingFolder] = useState<string | null>(null);
   const [draggingPartId, setDraggingPartId] = useState<string | null>(null);
   const [dragPosition, setDragPosition] = useState({ x: 0, y: 0 });
@@ -783,7 +736,7 @@ export function App() {
   const [drawingFrameFailed, setDrawingFrameFailed] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [lastSelectedPartId, setLastSelectedPartId] = useState<string | null>(null);
-  const [panelWidths, setPanelWidths] = useState({ editor: 380, folders: 260 });
+  const [panelWidths, setPanelWidths] = useState({ editor: 380 });
 
   useEffect(() => {
     if (sheetWebAppUrl) {
@@ -892,7 +845,12 @@ export function App() {
     () => getRelevantFolders(folders, sectionItems, activeSection),
     [activeSection, folders, sectionItems]
   );
-  const folderTree = useMemo(() => buildFolderTree(activeFolders, sectionItems), [activeFolders, sectionItems]);
+  const visibleFolders = useMemo(() => {
+    const parentId = folderFilter === "All" ? "" : folderFilter;
+    return activeFolders.filter((folder) => folder.parentId === parentId);
+  }, [activeFolders, folderFilter]);
+  const currentFolderPath = folderFilter === "All" ? "Root" : getFolderDisplayPath(folderFilter, activeFolders) || "Folder";
+  const tableColumnCount = activeSection === "production" ? 8 : 7;
   useEffect(() => {
     if (folderFilter !== "All" && !activeFolders.some((folder) => folder.id === folderFilter)) {
       setFolderFilter("All");
@@ -986,22 +944,7 @@ export function App() {
     const nextFolders = [...folders, ...newFolders];
     const createdFolderId = newFolders[newFolders.length - 1].id;
     setFolderFilter(createdFolderId);
-    setExpandedFolders((current) => {
-      const next = new Set(current);
-      if (parentId) next.add(parentId);
-      newFolders.slice(0, -1).forEach((folder) => next.add(folder.id));
-      return next;
-    });
     persist(parts, nextFolders);
-  }
-
-  function toggleFolder(folderId: string) {
-    setExpandedFolders((current) => {
-      const next = new Set(current);
-      if (next.has(folderId)) next.delete(folderId);
-      else next.add(folderId);
-      return next;
-    });
   }
 
   async function removeFolder(folderId: string) {
@@ -1045,12 +988,6 @@ export function App() {
       ...foldersWithoutMoved.slice(insertIndex)
     ]);
     persist(parts, nextFolders);
-    setExpandedFolders((current) => {
-      const next = new Set(current);
-      if (parentId) next.add(parentId);
-      next.add(folderId);
-      return next;
-    });
   }
 
   async function moveFolderToPosition(folderId: string, targetFolderId: string, position: FolderDropPosition) {
@@ -1272,25 +1209,16 @@ export function App() {
     event.preventDefault();
     const containerWidth = workspaceRef.current?.getBoundingClientRect().width ?? window.innerWidth;
     const startX = event.clientX;
-    const startWidths = { ...panelWidths };
+    const startWidths = { editor: panelWidths.editor };
     const reservedForHandlesAndGaps = 64;
-    const minimums = { editor: 300, folders: 210, library: 520 };
+    const minimums = { editor: 300, library: 520 };
 
     function handleMouseMove(moveEvent: globalThis.MouseEvent) {
       const delta = moveEvent.clientX - startX;
       setPanelWidths(() => {
-        if (panel === "editor") {
-          const maxEditor = containerWidth - startWidths.folders - minimums.library - reservedForHandlesAndGaps;
-          return {
-            ...startWidths,
-            editor: clampNumber(startWidths.editor + delta, minimums.editor, Math.max(minimums.editor, maxEditor))
-          };
-        }
-
-        const maxFolders = containerWidth - startWidths.editor - minimums.library - reservedForHandlesAndGaps;
+        const maxEditor = containerWidth - minimums.library - reservedForHandlesAndGaps;
         return {
-          ...startWidths,
-          folders: clampNumber(startWidths.folders + delta, minimums.folders, Math.max(minimums.folders, maxFolders))
+          editor: clampNumber(startWidths.editor + delta, minimums.editor, Math.max(minimums.editor, maxEditor))
         };
       });
     }
@@ -1555,70 +1483,6 @@ export function App() {
     });
   }
 
-  function renderFolderNode(node: FolderNode, depth = 0) {
-    const isExpanded = expandedFolders.has(node.id);
-    const hasChildren = node.children.length > 0;
-    const dropPosition = folderDropIndicator?.path === node.id ? folderDropIndicator.position : null;
-
-    return (
-      <div className="folder-node" key={node.id}>
-        <div
-          className={[
-            "folder-row",
-            draggingFolder === node.id ? "dragging" : "",
-            dropPosition ? `drop-${dropPosition}` : ""
-          ].filter(Boolean).join(" ")}
-          draggable
-          onDragStart={(event) => {
-            event.dataTransfer.effectAllowed = "move";
-            event.dataTransfer.setData("application/json", JSON.stringify({ type: "folder", path: node.id }));
-            const dragImage = document.createElement("div");
-            dragImage.className = "folder-drag-image";
-            document.body.appendChild(dragImage);
-            event.dataTransfer.setDragImage(dragImage, 0, 0);
-            window.setTimeout(() => dragImage.remove(), 0);
-            setDraggingFolder(node.id);
-            setDragPosition({ x: event.clientX, y: event.clientY });
-          }}
-          onDrag={(event) => {
-            if (event.clientX || event.clientY) setDragPosition({ x: event.clientX, y: event.clientY });
-          }}
-          onDragOver={(event) => updateFolderDragIndicator(event, node.id)}
-          onDrop={(event) => handleFolderDrop(event, node.id, draggingFolder ? getFolderDropPosition(event) : "inside")}
-          onDragEnd={clearDragState}
-          onContextMenu={(event) => openFolderContextMenu(event, node.id)}
-          style={{ paddingLeft: `${depth * 14}px` }}
-        >
-          <button
-            className="folder-toggle"
-            disabled={!hasChildren}
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              toggleFolder(node.id);
-            }}
-            title={hasChildren ? "Expand folder" : "No nested folders"}
-          >
-            {hasChildren ? (isExpanded ? "v" : ">") : ""}
-          </button>
-          <button
-            className={`folder-button ${folderFilter === node.id ? "active" : ""}`}
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              setFolderFilter(node.id);
-            }}
-          >
-            {dropPosition === "inside" && <Folder size={14} />}
-            <span>{node.name}</span>
-            <strong>{node.totalCount}</strong>
-          </button>
-        </div>
-        {hasChildren && isExpanded && node.children.map((child) => renderFolderNode(child, depth + 1))}
-      </div>
-    );
-  }
-
   return (
     <main className="app-shell" onClick={closeFolderContextMenu}>
       {draggingFolder && (
@@ -1767,8 +1631,7 @@ export function App() {
         className="workspace"
         ref={workspaceRef}
         style={{
-          "--editor-width": `${panelWidths.editor}px`,
-          "--folder-width": `${panelWidths.folders}px`
+          "--editor-width": `${panelWidths.editor}px`
         } as CSSProperties}
       >
         <form className="editor-panel" onSubmit={handleSubmit}>
@@ -1967,44 +1830,6 @@ export function App() {
           role="separator"
         />
 
-        <aside className="folder-panel">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Folders</p>
-              <h2>Organize</h2>
-            </div>
-            <button className="icon-button" type="button" onClick={() => void createFolder()} title="New folder">
-              <Plus size={15} />
-            </button>
-          </div>
-          <button
-            className={[
-              "folder-button",
-              folderFilter === "All" ? "active" : "",
-              folderDropIndicator?.path === "All" ? "drop-inside" : ""
-            ].filter(Boolean).join(" ")}
-            type="button"
-            onDragOver={(event) => updateFolderDragIndicator(event, "All", false)}
-            onDrop={(event) => handleFolderDrop(event, "All", "inside")}
-            onDragEnd={clearDragState}
-            onClick={() => setFolderFilter("All")}
-          >
-            {folderDropIndicator?.path === "All" && <Folder size={14} />}
-            <span>Root</span>
-            <strong>{getFolderDirectCount("")}</strong>
-          </button>
-          <div className="folder-tree">
-            {folderTree.map((folder) => renderFolderNode(folder))}
-          </div>
-        </aside>
-
-        <div
-          aria-label="Resize folder panel"
-          className="panel-resize-handle"
-          onMouseDown={(event) => startPanelResize("folders", event)}
-          role="separator"
-        />
-
         <section className="library-panel">
           <div className="toolbar">
             <div className="search-box">
@@ -2036,10 +1861,22 @@ export function App() {
           </div>
 
           <div className="table-heading">
-            <span>
-              {activeSection === "bom" ? "Bill of Materials" : "Production Tracker"} ({filteredParts.length} item(s))
-            </span>
+            <div className="list-heading">
+              <span>
+                {activeSection === "bom" ? "Bill of Materials" : "Production Tracker"} ({filteredParts.length + visibleFolders.length} item(s))
+              </span>
+              <small>{currentFolderPath}</small>
+            </div>
             <div>
+              {folderFilter !== "All" && (
+                <button className="ghost" type="button" onClick={() => setFolderFilter(getParentFolder(folderFilter, activeFolders))}>
+                  Up
+                </button>
+              )}
+              <button className="ghost" type="button" onClick={() => void createFolder()}>
+                <Plus size={14} />
+                New folder
+              </button>
               {selected.size > 0 && (
                 <button className="ghost-danger" type="button" onClick={deleteSelected}>
                   <Trash2 size={14} />
@@ -2052,7 +1889,11 @@ export function App() {
             </div>
           </div>
 
-          <div className="table-scroll">
+          <div
+            className="table-scroll"
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => handleFolderDrop(event, folderFilter)}
+          >
             <table>
               <thead>
                 <tr>
@@ -2072,6 +1913,46 @@ export function App() {
                 </tr>
               </thead>
               <tbody>
+                {visibleFolders.map((folder) => {
+                  const dropPosition = folderDropIndicator?.path === folder.id ? folderDropIndicator.position : null;
+                  return (
+                    <tr
+                      className={[
+                        "folder-list-row",
+                        draggingFolder === folder.id ? "dragging" : "",
+                        dropPosition ? `drop-${dropPosition}` : ""
+                      ].filter(Boolean).join(" ")}
+                      draggable
+                      key={folder.id}
+                      onClick={() => setFolderFilter(folder.id)}
+                      onContextMenu={(event) => openFolderContextMenu(event, folder.id)}
+                      onDragStart={(event) => {
+                        event.dataTransfer.effectAllowed = "move";
+                        event.dataTransfer.setData("application/json", JSON.stringify({ type: "folder", path: folder.id }));
+                        setDraggingFolder(folder.id);
+                        setDragPosition({ x: event.clientX, y: event.clientY });
+                      }}
+                      onDrag={(event) => {
+                        if (event.clientX || event.clientY) setDragPosition({ x: event.clientX, y: event.clientY });
+                      }}
+                      onDragOver={(event) => updateFolderDragIndicator(event, folder.id)}
+                      onDrop={(event) => handleFolderDrop(event, folder.id, draggingFolder ? getFolderDropPosition(event) : "inside")}
+                      onDragEnd={clearDragState}
+                    >
+                      <td></td>
+                      <td>
+                        <button className="part-name folder-name" type="button">
+                          <span><Folder size={15} /> {folder.name}</span>
+                          <small>{getFolderDirectCount(folder.id)} direct item(s)</small>
+                        </button>
+                      </td>
+                      <td>Folder</td>
+                      <td colSpan={tableColumnCount - 3}>
+                        {getFolderDisplayPath(folder.id, activeFolders)}
+                      </td>
+                    </tr>
+                  );
+                })}
                 {filteredParts.map((part) => {
                   const partDropPosition = partDropIndicator?.id === part.id ? partDropIndicator.position : null;
                   return (
