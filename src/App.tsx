@@ -1989,7 +1989,6 @@ export function App() {
                           style={{ "--tree-depth": depth } as CSSProperties}
                         >
                           <span className="tree-guides" aria-hidden="true" />
-                          <span className="tree-select-slot" />
                           <button
                             className="icon-button folder-expand-button"
                             disabled={!hasChildren}
@@ -2061,7 +2060,6 @@ export function App() {
                             readOnly
                           />
                         </span>
-                        <span className="tree-spacer" />
                         <button className="part-name" type="button" onClick={() => editPart(part)}>
                           <span>{part.name}</span>
                           <small>
