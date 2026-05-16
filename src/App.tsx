@@ -210,6 +210,7 @@ function safeHostname(value: string) {
 function normalizeExternalUrl(value: string) {
   const trimmed = value.trim();
   if (!trimmed) return "";
+  if (/^data:application\/pdf/i.test(trimmed)) return trimmed;
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
   if (/^www\./i.test(trimmed)) return `https://${trimmed}`;
   return "";
@@ -226,19 +227,28 @@ function renderLinkedValue(value: string, fallback = "") {
       className="list-link"
       draggable={false}
       href={href}
-      rel="noreferrer"
+      rel={href.startsWith("data:") ? undefined : "noreferrer"}
       target="_blank"
       title={text}
       onClick={(event) => {
         event.preventDefault();
         event.stopPropagation();
-        window.open(href, "_blank", "noopener,noreferrer");
+        window.open(href, "_blank", href.startsWith("data:") ? "noopener" : "noopener,noreferrer");
       }}
       onMouseDown={(event) => event.stopPropagation()}
     >
-      {text.replace(/^https?:\/\//i, "")}
+      {href.startsWith("data:") ? fallback || "Open PDF" : text.replace(/^https?:\/\//i, "")}
     </a>
   );
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("Could not read the selected file."));
+    reader.readAsDataURL(file);
+  });
 }
 
 function parseItemKind(value: unknown): ItemKind {
@@ -1445,6 +1455,49 @@ export function App() {
     saveFile("parts-tracker-backup.json", JSON.stringify(parts, null, 2), "application/json");
   }
 
+  function addBomSourceItem(sourceUrl: string, sourceType: "cart" | "pdf", label?: string) {
+    const href = normalizeExternalUrl(sourceUrl);
+    if (!href) return;
+
+    const host = sourceType === "cart" ? safeHostname(href) || "Cart" : "PDF";
+    const name = sourceType === "cart" ? `Cart: ${host}` : `PDF: ${label || "Checkout list"}`;
+    const nextPart = formToPart({
+      ...emptyForm,
+      name,
+      folder: "",
+      quantity: "1",
+      unitPrice: "0",
+      material: href,
+      thickness: label || (sourceType === "cart" ? "Cart link" : "Uploaded PDF"),
+      vendor: host,
+      location: sourceType === "cart" ? href : "",
+      notes: sourceType === "cart" ? "BOM source cart link." : `BOM source PDF${label ? `: ${label}` : ""}.`,
+      itemKind: "bom"
+    });
+
+    persist([nextPart, ...parts]);
+    setActiveSection("bom");
+  }
+
+  function addCartLinkBomItem() {
+    const url = window.prompt("Paste cart or checkout link");
+    if (!url?.trim()) return;
+    addBomSourceItem(url, "cart");
+  }
+
+  async function addPdfBomItem(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+      window.alert("Please choose a PDF file.");
+      return;
+    }
+
+    const dataUrl = await readFileAsDataUrl(file);
+    addBomSourceItem(dataUrl, "pdf", file.name);
+  }
+
   async function importCsv(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -1677,6 +1730,15 @@ export function App() {
             <Upload size={16} />
             Import CSV
             <input type="file" accept=".csv,text/csv" onChange={importCsv} />
+          </label>
+          <button className="button secondary" type="button" onClick={addCartLinkBomItem} title="Add one BOM item for a cart or checkout link">
+            <ExternalLink size={16} />
+            Cart Link
+          </button>
+          <label className="button secondary" title="Add one BOM item for a checkout PDF">
+            <Upload size={16} />
+            PDF Item
+            <input type="file" accept="application/pdf,.pdf" onChange={addPdfBomItem} />
           </label>
           <button className="button secondary" type="button" onClick={downloadJson} title="Download local backup">
             <FileJson size={16} />
