@@ -14,7 +14,7 @@ import {
   Upload,
   X
 } from "lucide-react";
-import { ChangeEvent, DragEvent, FormEvent, MouseEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, CSSProperties, DragEvent, FormEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type ProcessStatus = "Not Started" | "Queued" | "In Progress" | "Done" | "Blocked" | "Outsourced";
 
@@ -187,6 +187,10 @@ function buildScriptUrl(webAppUrl: string, params: Record<string, string>) {
   const url = new URL(webAppUrl);
   Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
   return url.toString();
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
 }
 
 function makeFolderId() {
@@ -701,6 +705,7 @@ function formToPart(form: PartForm, id: string = crypto.randomUUID()): Part {
 }
 
 export function App() {
+  const workspaceRef = useRef<HTMLElement | null>(null);
   const cachedWorkspace = useMemo(loadWorkspaceCache, []);
   const [parts, setParts] = useState<Part[]>(cachedWorkspace.parts);
   const [folderRecords, setFolderRecords] = useState<FolderRecord[]>(cachedWorkspace.folders);
@@ -734,6 +739,7 @@ export function App() {
   const [previewPartId, setPreviewPartId] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [lastSelectedPartId, setLastSelectedPartId] = useState<string | null>(null);
+  const [panelWidths, setPanelWidths] = useState({ editor: 380, folders: 260 });
 
   useEffect(() => {
     if (sheetWebAppUrl) {
@@ -1211,6 +1217,44 @@ export function App() {
     setFolderContextMenu(null);
   }
 
+  function startPanelResize(panel: "editor" | "folders", event: MouseEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const containerWidth = workspaceRef.current?.getBoundingClientRect().width ?? window.innerWidth;
+    const startX = event.clientX;
+    const startWidths = { ...panelWidths };
+    const reservedForHandlesAndGaps = 64;
+    const minimums = { editor: 300, folders: 210, library: 520 };
+
+    function handleMouseMove(moveEvent: globalThis.MouseEvent) {
+      const delta = moveEvent.clientX - startX;
+      setPanelWidths(() => {
+        if (panel === "editor") {
+          const maxEditor = containerWidth - startWidths.folders - minimums.library - reservedForHandlesAndGaps;
+          return {
+            ...startWidths,
+            editor: clampNumber(startWidths.editor + delta, minimums.editor, Math.max(minimums.editor, maxEditor))
+          };
+        }
+
+        const maxFolders = containerWidth - startWidths.editor - minimums.library - reservedForHandlesAndGaps;
+        return {
+          ...startWidths,
+          folders: clampNumber(startWidths.folders + delta, minimums.folders, Math.max(minimums.folders, maxFolders))
+        };
+      });
+    }
+
+    function handleMouseUp() {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+      document.body.classList.remove("is-resizing-panels");
+    }
+
+    document.body.classList.add("is-resizing-panels");
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+  }
+
   function removeProcess(index: number) {
     setForm((current) => ({
       ...current,
@@ -1645,7 +1689,14 @@ export function App() {
         </button>
       </section>
 
-      <section className="workspace">
+      <section
+        className="workspace"
+        ref={workspaceRef}
+        style={{
+          "--editor-width": `${panelWidths.editor}px`,
+          "--folder-width": `${panelWidths.folders}px`
+        } as CSSProperties}
+      >
         <form className="editor-panel" onSubmit={handleSubmit}>
           <div className="panel-heading">
             <div>
@@ -1835,6 +1886,13 @@ export function App() {
           </button>
         </form>
 
+        <div
+          aria-label="Resize editor panel"
+          className="panel-resize-handle"
+          onMouseDown={(event) => startPanelResize("editor", event)}
+          role="separator"
+        />
+
         <aside className="folder-panel">
           <div className="panel-heading">
             <div>
@@ -1865,6 +1923,13 @@ export function App() {
             {folderTree.map((folder) => renderFolderNode(folder))}
           </div>
         </aside>
+
+        <div
+          aria-label="Resize folder panel"
+          className="panel-resize-handle"
+          onMouseDown={(event) => startPanelResize("folders", event)}
+          role="separator"
+        />
 
         <section className="library-panel">
           <div className="toolbar">
