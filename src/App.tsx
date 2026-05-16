@@ -42,6 +42,9 @@ type Part = {
   notes: string;
   itemKind: ItemKind;
   linkedBomId: string;
+  attachmentFileName: string;
+  attachmentMimeType: string;
+  attachmentDataUrl: string;
 };
 
 type FolderRecord = {
@@ -115,7 +118,10 @@ const emptyForm: PartForm = {
   location: "",
   notes: "",
   itemKind: "bom",
-  linkedBomId: ""
+  linkedBomId: "",
+  attachmentFileName: "",
+  attachmentMimeType: "",
+  attachmentDataUrl: ""
 };
 
 const csvHeaders = [
@@ -134,7 +140,9 @@ const csvHeaders = [
   "location",
   "notes",
   "itemKind",
-  "linkedBomId"
+  "linkedBomId",
+  "attachmentFileName",
+  "attachmentMimeType"
 ] as const;
 
 function normalizePart(part: LegacyPart): Part {
@@ -168,7 +176,10 @@ function normalizePart(part: LegacyPart): Part {
     location: part.location || "",
     notes: part.notes || "",
     itemKind,
-    linkedBomId: part.linkedBomId || ""
+    linkedBomId: part.linkedBomId || "",
+    attachmentFileName: part.attachmentFileName || "",
+    attachmentMimeType: part.attachmentMimeType || "",
+    attachmentDataUrl: part.attachmentDataUrl || ""
   };
 }
 
@@ -178,6 +189,10 @@ type SheetResult = {
   folders?: LegacyFolder[];
   error?: string;
 };
+
+function stripLocalAttachmentData(parts: Part[]) {
+  return parts.map((part) => ({ ...part, attachmentDataUrl: "" }));
+}
 
 type WorkspaceCache = {
   parts: LegacyPart[];
@@ -364,7 +379,7 @@ function loadWorkspaceCache(): { parts: Part[]; folders: FolderRecord[]; dirty: 
 
 function saveWorkspaceCache(parts: Part[], folders: FolderRecord[], dirty: boolean, deletedPartIds: string[] = []) {
   const cache: WorkspaceCache = {
-    parts,
+    parts: dirty ? parts : stripLocalAttachmentData(parts),
     folders,
     dirty,
     deletedPartIds,
@@ -615,17 +630,25 @@ function reconcileWorkspaceForSync(
   let renumberedCount = 0;
 
   localParts.forEach((part) => {
-    const isNewToSheet = !remoteById.has(part.id);
+    const remotePart = remoteById.get(part.id);
+    const isNewToSheet = !remotePart;
     const needsProductionNumber = part.itemKind === "production";
     const hasCollision = Boolean(needsProductionNumber && part.partNumber && usedPartNumbers.has(part.partNumber));
-    let nextPart = part;
+    let nextPart = !part.attachmentDataUrl && remotePart?.attachmentDataUrl
+      ? {
+        ...part,
+        attachmentDataUrl: remotePart.attachmentDataUrl,
+        attachmentFileName: part.attachmentFileName || remotePart.attachmentFileName,
+        attachmentMimeType: part.attachmentMimeType || remotePart.attachmentMimeType
+      }
+      : part;
 
-    if (needsProductionNumber && (!part.partNumber || hasCollision)) {
+    if (needsProductionNumber && (!nextPart.partNumber || hasCollision)) {
       const nextNumber = nextAvailablePartNumber(usedPartNumbers);
       nextPart = {
-        ...part,
+        ...nextPart,
         partNumber: nextNumber,
-        originalPartNumber: isNewToSheet || !part.originalPartNumber ? nextNumber : part.originalPartNumber
+        originalPartNumber: isNewToSheet || !nextPart.originalPartNumber ? nextNumber : nextPart.originalPartNumber
       };
       renumberedCount += 1;
     }
@@ -985,8 +1008,12 @@ export function App() {
   const lowStockCount = bomItems.filter((part) => part.quantity <= 2).length;
   const blockedCount = productionItems.filter((part) => part.processes.some((process) => process.status === "Blocked")).length;
   const previewPart = parts.find((part) => part.id === previewPartId) ?? null;
-  const previewDrawingUrl = previewPart?.drawingUrl.trim() || "";
-  const isOnshapeDrawingUrl = /(^|\.)onshape\.com$/i.test(safeHostname(previewDrawingUrl));
+  const previewSourceUrl =
+    previewPart?.itemKind === "production"
+      ? previewPart.drawingUrl.trim()
+      : previewPart?.attachmentDataUrl || normalizeExternalUrl(previewPart?.material || "") || normalizeExternalUrl(previewPart?.location || "");
+  const previewIsPdf = Boolean(previewSourceUrl?.startsWith("data:application/pdf") || previewPart?.attachmentMimeType === "application/pdf");
+  const isOnshapeDrawingUrl = /(^|\.)onshape\.com$/i.test(safeHostname(previewSourceUrl || ""));
   const nextPartNumber = useMemo(() => generateNextPartNumber(parts), [parts]);
   const visiblePartNumber = form.partNumber || (!editingId ? nextPartNumber : "");
   const originalPartNumber = form.originalPartNumber || (!editingId ? nextPartNumber : form.partNumber);
@@ -1467,16 +1494,20 @@ export function App() {
       folder: "",
       quantity: "1",
       unitPrice: "0",
-      material: href,
+      material: sourceType === "cart" ? href : "Checkout PDF",
       thickness: label || (sourceType === "cart" ? "Cart link" : "Uploaded PDF"),
       vendor: host,
       location: sourceType === "cart" ? href : "",
       notes: sourceType === "cart" ? "BOM source cart link." : `BOM source PDF${label ? `: ${label}` : ""}.`,
-      itemKind: "bom"
+      itemKind: "bom",
+      attachmentFileName: sourceType === "pdf" ? label || "checkout.pdf" : "",
+      attachmentMimeType: sourceType === "pdf" ? "application/pdf" : "",
+      attachmentDataUrl: sourceType === "pdf" ? href : ""
     });
 
     persist([nextPart, ...parts]);
     setActiveSection("bom");
+    if (sourceType === "pdf") setPreviewPartId(nextPart.id);
   }
 
   function addCartLinkBomItem() {
@@ -1552,7 +1583,10 @@ export function App() {
           location: record.location ?? "",
           notes: record.notes ?? "",
           itemKind: record.itemKind === "production" ? "production" : "bom",
-          linkedBomId: record.linkedBomId ?? ""
+          linkedBomId: record.linkedBomId ?? "",
+          attachmentFileName: record.attachmentFileName ?? "",
+          attachmentMimeType: record.attachmentMimeType ?? "",
+          attachmentDataUrl: ""
         },
         record.id || undefined
       );
@@ -2252,7 +2286,11 @@ export function App() {
                     <td>
                       {activeSection === "bom" ? (
                         <>
-                          <div title={part.material}>{renderLinkedValue(part.material)}</div>
+                          <div title={part.attachmentFileName || part.material}>
+                            {part.attachmentDataUrl
+                              ? renderLinkedValue(part.attachmentDataUrl, part.attachmentFileName || "Open PDF")
+                              : renderLinkedValue(part.material)}
+                          </div>
                           <small title={part.thickness}>{renderLinkedValue(part.thickness)}</small>
                         </>
                       ) : (
@@ -2303,21 +2341,21 @@ export function App() {
             </table>
           </div>
 
-          {previewPart && previewPart.itemKind === "production" && (
+          {previewPart && (
             <section className="drawing-preview">
               <div className="preview-heading">
                 <div>
-                  <p className="eyebrow">Drawing preview</p>
+                  <p className="eyebrow">{previewIsPdf ? "PDF preview" : previewPart.itemKind === "production" ? "Drawing preview" : "BOM source preview"}</p>
                   <h2>{previewPart.name}</h2>
                 </div>
                 <div className="preview-actions">
-                  {previewDrawingUrl && (
+                  {previewSourceUrl && (
                     <a
                       className="icon-button"
-                      href={previewDrawingUrl}
-                      rel="noreferrer"
+                      href={previewSourceUrl}
+                      rel={previewSourceUrl.startsWith("data:") ? undefined : "noreferrer"}
                       target="_blank"
-                      title="Open drawing"
+                      title="Open source"
                     >
                       <ExternalLink size={16} />
                     </a>
@@ -2332,7 +2370,7 @@ export function App() {
                   </button>
                 </div>
               </div>
-              {previewDrawingUrl ? (
+              {previewSourceUrl ? (
                 <div className="drawing-frame-wrap">
                   {isOnshapeDrawingUrl && (
                     <div className="drawing-notice">
@@ -2342,16 +2380,16 @@ export function App() {
                   {drawingFrameFailed ? (
                     <div className="empty-preview">
                       <span>Preview could not load in the app.</span>
-                      <a href={previewDrawingUrl} rel="noreferrer" target="_blank">Open drawing</a>
+                      <a href={previewSourceUrl} rel={previewSourceUrl.startsWith("data:") ? undefined : "noreferrer"} target="_blank">Open source</a>
                     </div>
                   ) : (
                     <iframe
                       allow="fullscreen"
                       allowFullScreen
-                      key={previewDrawingUrl}
+                      key={previewSourceUrl}
                       loading="lazy"
-                      src={previewDrawingUrl}
-                      title={`${previewPart.name} Onshape drawing`}
+                      src={previewSourceUrl}
+                      title={`${previewPart.name} preview`}
                       referrerPolicy="no-referrer-when-downgrade"
                       onError={() => setDrawingFrameFailed(true)}
                     />
@@ -2359,7 +2397,7 @@ export function App() {
                 </div>
               ) : (
                 <div className="empty-preview">
-                  <span>No Onshape drawing link saved for this part.</span>
+                  <span>No preview link saved for this item.</span>
                 </div>
               )}
             </section>
