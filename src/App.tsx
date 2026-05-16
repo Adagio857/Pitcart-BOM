@@ -224,11 +224,17 @@ function renderLinkedValue(value: string, fallback = "") {
   return (
     <a
       className="list-link"
+      draggable={false}
       href={href}
       rel="noreferrer"
       target="_blank"
       title={text}
-      onClick={(event) => event.stopPropagation()}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        window.open(href, "_blank", "noopener,noreferrer");
+      }}
+      onMouseDown={(event) => event.stopPropagation()}
     >
       {text.replace(/^https?:\/\//i, "")}
     </a>
