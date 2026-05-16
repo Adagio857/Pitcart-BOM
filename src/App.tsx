@@ -2148,7 +2148,7 @@ export function App() {
                           >
                             {isExpanded ? "v" : ">"}
                           </button>
-                          <button className="part-name folder-name" type="button">
+                          <button className="part-name folder-name" type="button" title={folder.name}>
                             <span><Folder size={15} /> {folder.name}</span>
                           </button>
                         </div>
@@ -2222,9 +2222,16 @@ export function App() {
                               editPart(part);
                             }}
                           >
-                            <span>{part.name}</span>
+                            <span title={part.name}>{part.name}</span>
                           </button>
-                          <small className="list-subtext">
+                          <small
+                            className="list-subtext"
+                            title={
+                              activeSection === "bom"
+                                ? `${part.vendor || "No vendor"} - ${part.location || "No location"}`
+                                : part.drawingUrl || "No drawing"
+                            }
+                          >
                             {activeSection === "bom"
                               ? (
                                 <>
@@ -2238,18 +2245,24 @@ export function App() {
                         </div>
                       </div>
                     </td>
-                    <td>{part.folder ? getFolderDisplayPath(part.folder, folders) || "Unknown folder" : "Root"}</td>
+                    <td title={part.folder ? getFolderDisplayPath(part.folder, folders) || "Unknown folder" : "Root"}>
+                      {part.folder ? getFolderDisplayPath(part.folder, folders) || "Unknown folder" : "Root"}
+                    </td>
                     {activeSection === "production" && <td>{part.partNumber}</td>}
                     <td>
                       {activeSection === "bom" ? (
                         <>
-                          <div>{renderLinkedValue(part.material)}</div>
-                          <small>{renderLinkedValue(part.thickness)}</small>
+                          <div title={part.material}>{renderLinkedValue(part.material)}</div>
+                          <small title={part.thickness}>{renderLinkedValue(part.thickness)}</small>
                         </>
                       ) : (
                         <>
-                          <div>{bomItems.find((item) => item.id === part.linkedBomId)?.name || "No BOM link"}</div>
-                          <small>{renderLinkedValue(bomItems.find((item) => item.id === part.linkedBomId)?.material || "")}</small>
+                          <div title={bomItems.find((item) => item.id === part.linkedBomId)?.name || "No BOM link"}>
+                            {bomItems.find((item) => item.id === part.linkedBomId)?.name || "No BOM link"}
+                          </div>
+                          <small title={bomItems.find((item) => item.id === part.linkedBomId)?.material || ""}>
+                            {renderLinkedValue(bomItems.find((item) => item.id === part.linkedBomId)?.material || "")}
+                          </small>
                         </>
                       )}
                     </td>
