@@ -746,7 +746,22 @@ textarea:focus {
   gap: 8px;
 }
 
-.drawing-preview iframe,
+.drawing-frame-wrap {
+  display: grid;
+  gap: 8px;
+}
+
+.drawing-notice {
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 200, 87, 0.2);
+  border-radius: 6px;
+  background: rgba(255, 200, 87, 0.08);
+  color: #dbc887;
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.drawing-frame-wrap iframe,
 .empty-preview {
   width: 100%;
   height: min(58vh, 620px);
@@ -759,9 +774,14 @@ textarea:focus {
 .empty-preview {
   display: grid;
   place-items: center;
+  gap: 10px;
   color: #8da5a4;
   font-weight: 700;
   text-align: center;
+}
+
+.empty-preview a {
+  color: #69ead7;
 }
 
 table {

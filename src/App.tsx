@@ -48,6 +48,7 @@ type FolderRecord = {
   id: string;
   name: string;
   parentId: string;
+  itemKind: ItemKind;
 };
 
 type LegacyPart = Omit<Partial<Part>, "processes"> & {
@@ -193,12 +194,24 @@ function clampNumber(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
+function safeHostname(value: string) {
+  try {
+    return new URL(value).hostname;
+  } catch {
+    return "";
+  }
+}
+
+function parseItemKind(value: unknown): ItemKind {
+  return value === "production" ? "production" : "bom";
+}
+
 function makeFolderId() {
   return `folder-${crypto.randomUUID()}`;
 }
 
-function legacyFolderId(path: string) {
-  return `legacy-${normalizeFolderPath(path).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+function legacyFolderId(path: string, itemKind: ItemKind) {
+  return `legacy-${itemKind}-${normalizeFolderPath(path).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
 }
 
 function normalizeFolders(rawFolders: LegacyFolder[], rawParts: LegacyPart[] = []) {
@@ -211,29 +224,31 @@ function normalizeFolders(rawFolders: LegacyFolder[], rawParts: LegacyPart[] = [
     const normalizedRecord = {
       id: record.id,
       name: record.name.trim() || "Untitled folder",
-      parentId: record.parentId || ""
+      parentId: record.parentId || "",
+      itemKind: parseItemKind(record.itemKind)
     };
     folderById.set(normalizedRecord.id, normalizedRecord);
     records.push(normalizedRecord);
     return normalizedRecord.id;
   }
 
-  function ensurePath(path: string) {
+  function ensurePath(path: string, itemKind: ItemKind) {
     const pieces = splitFolderPath(path);
     let parentId = "";
     let currentPath = "";
 
     pieces.forEach((piece) => {
       currentPath = currentPath ? `${currentPath} / ${piece}` : piece;
-      const existingId = idByPath.get(currentPath);
+      const pathKey = `${itemKind}:${currentPath}`;
+      const existingId = idByPath.get(pathKey);
       if (existingId) {
         parentId = existingId;
         return;
       }
 
-      const id = legacyFolderId(currentPath);
-      parentId = addRecord({ id, name: piece, parentId });
-      idByPath.set(currentPath, id);
+      const id = legacyFolderId(currentPath, itemKind);
+      parentId = addRecord({ id, name: piece, parentId, itemKind });
+      idByPath.set(pathKey, id);
     });
 
     return parentId;
@@ -241,23 +256,31 @@ function normalizeFolders(rawFolders: LegacyFolder[], rawParts: LegacyPart[] = [
 
   rawFolders.forEach((folder) => {
     if (typeof folder === "string") {
-      ensurePath(folder);
+      ensurePath(folder, "bom");
       return;
     }
 
     const id = String(folder.id || "").trim();
     const name = String(folder.name || "").trim();
-    if (id && name) addRecord({ id, name, parentId: String(folder.parentId || "").trim() });
+    if (id && name) {
+      addRecord({
+        id,
+        name,
+        parentId: String(folder.parentId || "").trim(),
+        itemKind: parseItemKind(folder.itemKind)
+      });
+    }
   });
 
   rawParts.forEach((part) => {
     const folder = String(part.folder || "").trim();
-    if (folder && folder !== "Unfiled" && !folderById.has(folder)) ensurePath(folder);
+    const itemKind = parseItemKind(part.itemKind);
+    if (folder && folder !== "Unfiled" && !folderById.has(folder)) ensurePath(folder, itemKind);
   });
 
   records.forEach((folder) => {
     const path = getFolderDisplayPath(folder.id, records);
-    if (path) idByPath.set(path, folder.id);
+    if (path) idByPath.set(`${folder.itemKind}:${path}`, folder.id);
   });
 
   return { folders: records, idByPath, folderIds: new Set(records.map((folder) => folder.id)) };
@@ -267,7 +290,7 @@ function migratePartFolder(part: Part, idByPath: Map<string, string>, folderIds:
   if (!part.folder) return part;
   if (folderIds.has(part.folder)) return part;
   const normalizedPath = normalizeFolderPath(part.folder);
-  return { ...part, folder: idByPath.get(normalizedPath) || "" };
+  return { ...part, folder: idByPath.get(`${part.itemKind}:${normalizedPath}`) || idByPath.get(`bom:${normalizedPath}`) || "" };
 }
 
 function loadWorkspaceCache(): { parts: Part[]; folders: FolderRecord[]; dirty: boolean } {
@@ -585,6 +608,26 @@ function uniqueFoldersById(values: FolderRecord[]) {
   });
 }
 
+function getRelevantFolders(folders: FolderRecord[], sectionItems: Part[], itemKind: ItemKind) {
+  const relevantIds = new Set(folders.filter((folder) => folder.itemKind === itemKind).map((folder) => folder.id));
+  sectionItems.forEach((part) => {
+    if (part.folder) relevantIds.add(part.folder);
+  });
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    folders.forEach((folder) => {
+      if (relevantIds.has(folder.id) && folder.parentId && !relevantIds.has(folder.parentId)) {
+        relevantIds.add(folder.parentId);
+        changed = true;
+      }
+    });
+  }
+
+  return folders.filter((folder) => relevantIds.has(folder.id));
+}
+
 type FolderNode = {
   id: string;
   name: string;
@@ -737,6 +780,7 @@ export function App() {
   const [partDropIndicator, setPartDropIndicator] = useState<PartDropIndicator | null>(null);
   const [folderContextMenu, setFolderContextMenu] = useState<FolderContextMenu | null>(null);
   const [previewPartId, setPreviewPartId] = useState<string | null>(null);
+  const [drawingFrameFailed, setDrawingFrameFailed] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [lastSelectedPartId, setLastSelectedPartId] = useState<string | null>(null);
   const [panelWidths, setPanelWidths] = useState({ editor: 380, folders: 260 });
@@ -844,12 +888,16 @@ export function App() {
   const sectionItems = activeSection === "bom" ? bomItems : productionItems;
 
   const folders = useMemo(() => uniqueFoldersById(folderRecords), [folderRecords]);
-  const folderTree = useMemo(() => buildFolderTree(folders, sectionItems), [folders, sectionItems]);
+  const activeFolders = useMemo(
+    () => getRelevantFolders(folders, sectionItems, activeSection),
+    [activeSection, folders, sectionItems]
+  );
+  const folderTree = useMemo(() => buildFolderTree(activeFolders, sectionItems), [activeFolders, sectionItems]);
   useEffect(() => {
-    if (folderFilter !== "All" && !folders.some((folder) => folder.id === folderFilter)) {
+    if (folderFilter !== "All" && !activeFolders.some((folder) => folder.id === folderFilter)) {
       setFolderFilter("All");
     }
-  }, [folderFilter, folders]);
+  }, [activeFolders, folderFilter]);
 
   useEffect(() => {
     setSelected(new Set());
@@ -867,7 +915,7 @@ export function App() {
       const folderMatches = normalizedQuery
         ? folderFilter === "All" || partFolder === folderFilter || descendantIds.has(partFolder)
         : folderFilter === "All"
-          ? partFolder === ""
+          ? true
           : partFolder === folderFilter;
       const statusMatches =
         activeSection === "bom" || statusFilter === "All" || part.processes.some((process) => process.status === statusFilter);
@@ -890,6 +938,8 @@ export function App() {
   const lowStockCount = bomItems.filter((part) => part.quantity <= 2).length;
   const blockedCount = productionItems.filter((part) => part.processes.some((process) => process.status === "Blocked")).length;
   const previewPart = parts.find((part) => part.id === previewPartId) ?? null;
+  const previewDrawingUrl = previewPart?.drawingUrl.trim() || "";
+  const isOnshapeDrawingUrl = /(^|\.)onshape\.com$/i.test(safeHostname(previewDrawingUrl));
   const nextPartNumber = useMemo(() => generateNextPartNumber(parts), [parts]);
   const visiblePartNumber = form.partNumber || (!editingId ? nextPartNumber : "");
   const originalPartNumber = form.originalPartNumber || (!editingId ? nextPartNumber : form.partNumber);
@@ -928,7 +978,7 @@ export function App() {
     const parentId = parent === "All" ? "" : parent;
     let activeParentId = parentId;
     const newFolders = splitFolderPath(draft).map((name) => {
-      const folder = { id: makeFolderId(), name, parentId: activeParentId };
+      const folder = { id: makeFolderId(), name, parentId: activeParentId, itemKind: activeSection };
       activeParentId = folder.id;
       return folder;
     });
@@ -1316,6 +1366,7 @@ export function App() {
 
   function editPart(part: Part) {
     setPreviewPartId(part.id);
+    setDrawingFrameFailed(false);
     setEditingId(part.id);
     setActiveSection(part.itemKind);
     setForm(partToForm(part));
@@ -1384,7 +1435,7 @@ export function App() {
           parentId = currentId;
           return;
         }
-        const folder = { id: makeFolderId(), name, parentId };
+        const folder = { id: makeFolderId(), name, parentId, itemKind: activeSection };
         importedFolders.push(folder);
         importedPathToId.set(currentPath, folder.id);
         parentId = folder.id;
@@ -1460,6 +1511,28 @@ export function App() {
     }
 
     setSelected(new Set([id]));
+    setLastSelectedPartId(id);
+  }
+
+  function togglePartCheckbox(id: string, event: MouseEvent<HTMLInputElement>) {
+    event.stopPropagation();
+
+    if (event.shiftKey && lastSelectedPartId) {
+      const rangeIds = selectPartRange(lastSelectedPartId, id);
+      setSelected((current) => {
+        const next = new Set(current);
+        rangeIds.forEach((partId) => next.add(partId));
+        return next;
+      });
+      return;
+    }
+
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
     setLastSelectedPartId(id);
   }
 
@@ -2037,11 +2110,8 @@ export function App() {
                         aria-label={`Select ${part.name}`}
                         type="checkbox"
                         checked={selected.has(part.id)}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          selectPartLikeFileManager(part.id, event);
-                        }}
-                        onChange={() => undefined}
+                        onClick={(event) => togglePartCheckbox(part.id, event)}
+                        readOnly
                       />
                     </td>
                     <td>
@@ -2114,10 +2184,10 @@ export function App() {
                   <h2>{previewPart.name}</h2>
                 </div>
                 <div className="preview-actions">
-                  {previewPart.drawingUrl && (
+                  {previewDrawingUrl && (
                     <a
                       className="icon-button"
-                      href={previewPart.drawingUrl}
+                      href={previewDrawingUrl}
                       rel="noreferrer"
                       target="_blank"
                       title="Open drawing"
@@ -2135,14 +2205,31 @@ export function App() {
                   </button>
                 </div>
               </div>
-              {previewPart.drawingUrl ? (
-                <iframe
-                  allowFullScreen
-                  loading="lazy"
-                  src={previewPart.drawingUrl}
-                  title={`${previewPart.name} Onshape drawing`}
-                  referrerPolicy="no-referrer-when-downgrade"
-                />
+              {previewDrawingUrl ? (
+                <div className="drawing-frame-wrap">
+                  {isOnshapeDrawingUrl && (
+                    <div className="drawing-notice">
+                      Onshape may block embedded previews for private documents. Use the open button if the frame asks you to sign in or stays blank.
+                    </div>
+                  )}
+                  {drawingFrameFailed ? (
+                    <div className="empty-preview">
+                      <span>Preview could not load in the app.</span>
+                      <a href={previewDrawingUrl} rel="noreferrer" target="_blank">Open drawing</a>
+                    </div>
+                  ) : (
+                    <iframe
+                      allow="fullscreen"
+                      allowFullScreen
+                      key={previewDrawingUrl}
+                      loading="lazy"
+                      src={previewDrawingUrl}
+                      title={`${previewPart.name} Onshape drawing`}
+                      referrerPolicy="no-referrer-when-downgrade"
+                      onError={() => setDrawingFrameFailed(true)}
+                    />
+                  )}
+                </div>
               ) : (
                 <div className="empty-preview">
                   <span>No Onshape drawing link saved for this part.</span>

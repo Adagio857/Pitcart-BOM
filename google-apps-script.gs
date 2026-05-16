@@ -22,7 +22,7 @@ const HEADERS = [
   'itemKind',
   'linkedBomId'
 ];
-const FOLDER_HEADERS = ['id', 'name', 'parentId', 'order'];
+const FOLDER_HEADERS = ['id', 'name', 'parentId', 'order', 'itemKind'];
 
 function doGet(e) {
   const result = handleRequest_(e);
@@ -262,8 +262,9 @@ function readFolders_() {
       const id = String(row[0] || '').trim();
       const name = String(row[1] || '').trim();
       const parentId = String(row[2] || '').trim();
+      const itemKind = String(row[4] || '').trim();
       if (id && name && !parentId && /^\d+$/.test(name)) return id;
-      return { id, name, parentId };
+      return { id, name, parentId, itemKind };
     })
     .filter(folder => typeof folder === 'string' ? folder : folder.id && folder.name);
 }
@@ -280,12 +281,13 @@ function writeFolders_(folders) {
     .map(folder => {
       if (typeof folder === 'string') {
         const path = String(folder || '').trim();
-        return { id: `legacy-${path.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`, name: path.split('/').pop().trim(), parentId: '' };
+        return { id: `legacy-bom-${path.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`, name: path.split('/').pop().trim(), parentId: '', itemKind: 'bom' };
       }
       return {
         id: String(folder.id || '').trim(),
         name: String(folder.name || '').trim(),
-        parentId: String(folder.parentId || '').trim()
+        parentId: String(folder.parentId || '').trim(),
+        itemKind: String(folder.itemKind || 'bom').trim() === 'production' ? 'production' : 'bom'
       };
     })
     .filter(folder => {
@@ -297,7 +299,7 @@ function writeFolders_(folders) {
 
   sheet
     .getRange(2, 1, uniqueFolders.length, FOLDER_HEADERS.length)
-    .setValues(uniqueFolders.map((folder, index) => [folder.id, folder.name, folder.parentId, index]));
+    .setValues(uniqueFolders.map((folder, index) => [folder.id, folder.name, folder.parentId, index, folder.itemKind]));
 }
 
 function json_(payload) {
