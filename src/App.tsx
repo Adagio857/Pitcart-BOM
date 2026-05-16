@@ -183,6 +183,7 @@ type WorkspaceCache = {
   parts: LegacyPart[];
   folders: LegacyFolder[];
   dirty: boolean;
+  deletedPartIds?: string[];
   updatedAt: string;
 };
 
@@ -297,26 +298,32 @@ function migratePartFolder(part: Part, idByPath: Map<string, string>, folderIds:
   return { ...part, folder: idByPath.get(`${part.itemKind}:${normalizedPath}`) || idByPath.get(`bom:${normalizedPath}`) || "" };
 }
 
-function loadWorkspaceCache(): { parts: Part[]; folders: FolderRecord[]; dirty: boolean } {
+function loadWorkspaceCache(): { parts: Part[]; folders: FolderRecord[]; dirty: boolean; deletedPartIds: string[] } {
   const saved = localStorage.getItem(WORKSPACE_CACHE_KEY);
-  if (!saved) return { parts: [], folders: [], dirty: false };
+  if (!saved) return { parts: [], folders: [], dirty: false, deletedPartIds: [] };
 
   try {
     const cache = JSON.parse(saved) as WorkspaceCache;
     const rawParts = Array.isArray(cache.parts) ? cache.parts : [];
     const { folders, idByPath, folderIds } = normalizeFolders(Array.isArray(cache.folders) ? cache.folders : [], rawParts);
     const parts = rawParts.map(normalizePart).map((part) => migratePartFolder(part, idByPath, folderIds));
-    return { parts, folders, dirty: Boolean(cache.dirty) };
+    return {
+      parts,
+      folders,
+      dirty: Boolean(cache.dirty),
+      deletedPartIds: Array.isArray(cache.deletedPartIds) ? cache.deletedPartIds.filter(Boolean) : []
+    };
   } catch {
-    return { parts: [], folders: [], dirty: false };
+    return { parts: [], folders: [], dirty: false, deletedPartIds: [] };
   }
 }
 
-function saveWorkspaceCache(parts: Part[], folders: FolderRecord[], dirty: boolean) {
+function saveWorkspaceCache(parts: Part[], folders: FolderRecord[], dirty: boolean, deletedPartIds: string[] = []) {
   const cache: WorkspaceCache = {
     parts,
     folders,
     dirty,
+    deletedPartIds,
     updatedAt: new Date().toISOString()
   };
   localStorage.setItem(WORKSPACE_CACHE_KEY, JSON.stringify(cache));
@@ -551,11 +558,13 @@ function reconcileWorkspaceForSync(
   localParts: Part[],
   remoteParts: Part[],
   localFolders: FolderRecord[],
-  remoteFolders: FolderRecord[]
+  remoteFolders: FolderRecord[],
+  deletedPartIds: string[] = []
 ) {
   const remoteById = new Map(remoteParts.map((part) => [part.id, part]));
   const localById = new Map(localParts.map((part) => [part.id, part]));
-  const mergedParts = remoteParts.filter((part) => !localById.has(part.id));
+  const deletedPartIdSet = new Set(deletedPartIds);
+  const mergedParts = remoteParts.filter((part) => !localById.has(part.id) && !deletedPartIdSet.has(part.id));
   const usedPartNumbers = new Set(
     mergedParts.filter((part) => part.itemKind === "production").map((part) => part.partNumber).filter(Boolean)
   );
@@ -715,6 +724,7 @@ export function App() {
   const sheetWebAppUrl = DEFAULT_APPS_SCRIPT_URL;
   const [isSheetLoading, setIsSheetLoading] = useState(false);
   const [hasPendingSync, setHasPendingSync] = useState(cachedWorkspace.dirty);
+  const [deletedPartIds, setDeletedPartIds] = useState<string[]>(cachedWorkspace.deletedPartIds);
   const [sheetMessage, setSheetMessage] = useState(
     cachedWorkspace.parts.length
       ? cachedWorkspace.dirty
@@ -756,7 +766,7 @@ export function App() {
     }, SYNC_INTERVAL_MS);
 
     return () => window.clearTimeout(timer);
-  }, [folderRecords, hasPendingSync, isSheetLoading, parts, sheetWebAppUrl]);
+  }, [deletedPartIds, folderRecords, hasPendingSync, isSheetLoading, parts, sheetWebAppUrl]);
 
   async function refreshFromSheet(url = sheetWebAppUrl) {
     if (!url) {
@@ -773,6 +783,7 @@ export function App() {
       const nextFolders = workspace.folders;
       setParts(nextParts);
       setFolderRecords(nextFolders);
+      setDeletedPartIds([]);
       saveWorkspaceCache(nextParts, nextFolders, false);
       setHasPendingSync(false);
       setSelected(new Set());
@@ -785,11 +796,12 @@ export function App() {
     }
   }
 
-  function persist(nextParts: Part[], nextFolders = folderRecords) {
+  function persist(nextParts: Part[], nextFolders = folderRecords, nextDeletedPartIds = deletedPartIds) {
     setParts(nextParts);
     setFolderRecords(nextFolders);
+    setDeletedPartIds(nextDeletedPartIds);
     setHasPendingSync(true);
-    saveWorkspaceCache(nextParts, nextFolders, true);
+    saveWorkspaceCache(nextParts, nextFolders, true, nextDeletedPartIds);
     setSheetMessage(sheetWebAppUrl ? "Saved locally. Google Sheet sync pending." : "Saved locally. Sheet sync is not configured.");
     return true;
   }
@@ -804,12 +816,19 @@ export function App() {
     setSheetMessage("Checking latest Sheet data before syncing...");
     try {
       const remoteWorkspace = await readWorkspaceFromSheet(sheetWebAppUrl);
-      const reconciled = reconcileWorkspaceForSync(parts, remoteWorkspace.parts, folderRecords, remoteWorkspace.folders);
+      const reconciled = reconcileWorkspaceForSync(
+        parts,
+        remoteWorkspace.parts,
+        folderRecords,
+        remoteWorkspace.folders,
+        deletedPartIds
+      );
 
       setSheetMessage("Syncing local changes to Google Sheet...");
       await writeWorkspaceToSheet(sheetWebAppUrl, reconciled.parts, reconciled.folders);
       setParts(reconciled.parts);
       setFolderRecords(reconciled.folders);
+      setDeletedPartIds([]);
       saveWorkspaceCache(reconciled.parts, reconciled.folders, false);
       setHasPendingSync(false);
       setSheetMessage(
@@ -1354,7 +1373,8 @@ export function App() {
   }
 
   async function deletePart(id: string) {
-    persist(parts.filter((part) => part.id !== id));
+    const nextDeletedPartIds = Array.from(new Set([...deletedPartIds, id]));
+    persist(parts.filter((part) => part.id !== id), folderRecords, nextDeletedPartIds);
     if (previewPartId === id) setPreviewPartId(null);
     setSelected((current) => {
       const next = new Set(current);
@@ -1364,7 +1384,8 @@ export function App() {
   }
 
   async function deleteSelected() {
-    persist(parts.filter((part) => !selected.has(part.id)));
+    const nextDeletedPartIds = Array.from(new Set([...deletedPartIds, ...selected]));
+    persist(parts.filter((part) => !selected.has(part.id)), folderRecords, nextDeletedPartIds);
     if (previewPartId && selected.has(previewPartId)) setPreviewPartId(null);
     setSelected(new Set());
     setLastSelectedPartId(null);
@@ -1940,11 +1961,27 @@ export function App() {
             onDragOver={(event) => event.preventDefault()}
             onDrop={(event) => handleFolderDrop(event, "All")}
           >
-            <table>
+            <table className={`parts-table ${activeSection === "production" ? "production-table" : "bom-table"}`}>
+              <colgroup>
+                <col className="col-tree-control" />
+                <col className="col-name" />
+                <col className="col-folder" />
+                {activeSection === "production" && <col className="col-part-number" />}
+                <col className="col-material" />
+                {activeSection === "production" && <col className="col-processes" />}
+                {activeSection === "production" ? (
+                  <col className="col-drawing" />
+                ) : (
+                  <>
+                    <col className="col-qty" />
+                    <col className="col-price" />
+                  </>
+                )}
+                <col className="col-actions" />
+              </colgroup>
               <thead>
                 <tr>
-                  <th></th>
-                  <th>Name</th>
+                  <th colSpan={2}>Name</th>
                   <th>Folder</th>
                   {activeSection === "production" && <th>Part #</th>}
                   {activeSection === "bom" ? <th>Material / Stock</th> : <th>Linked BOM Item</th>}

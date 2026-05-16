@@ -613,7 +613,8 @@ textarea:focus {
 }
 
 .table-scroll {
-  overflow-x: auto;
+  width: 100%;
+  overflow-x: hidden;
 }
 
 .drawing-preview {
@@ -675,13 +676,70 @@ textarea:focus {
 
 table {
   width: 100%;
-  min-width: 1120px;
+  min-width: 0;
   border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.col-tree-control {
+  width: 34px;
+}
+
+.bom-table .col-name {
+  width: 32%;
+}
+
+.bom-table .col-folder {
+  width: 16%;
+}
+
+.bom-table .col-material {
+  width: 24%;
+}
+
+.bom-table .col-qty {
+  width: 7%;
+}
+
+.bom-table .col-price {
+  width: 8%;
+}
+
+.bom-table .col-actions {
+  width: 13%;
+}
+
+.production-table .col-name {
+  width: 27%;
+}
+
+.production-table .col-folder {
+  width: 13%;
+}
+
+.production-table .col-part-number {
+  width: 9%;
+}
+
+.production-table .col-material {
+  width: 16%;
+}
+
+.production-table .col-processes {
+  width: 17%;
+}
+
+.production-table .col-drawing {
+  width: 7%;
+}
+
+.production-table .col-actions {
+  width: 11%;
 }
 
 th,
 td {
-  padding: 0 12px;
+  padding: 0 8px;
   border-top: 1px solid rgba(112, 139, 138, 0.12);
   text-align: left;
   vertical-align: middle;
@@ -694,6 +752,9 @@ th {
   font-size: var(--text-xs);
   font-weight: 700;
   text-transform: uppercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 td {
@@ -706,6 +767,16 @@ tbody tr {
 }
 
 tbody td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+tbody td > div:not(.row-actions):not(.process-chips),
+tbody td small {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -748,7 +819,8 @@ tbody tr.folder-list-row:hover {
   grid-template-columns: calc(var(--tree-depth) * var(--tree-indent)) var(--tree-control) minmax(0, 1fr);
   align-items: center;
   gap: 7px;
-  min-width: max-content;
+  min-width: 0;
+  width: 100%;
   height: 56px;
   max-height: 56px;
 }
@@ -887,7 +959,7 @@ td small {
 
 .process-chips {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 6px;
   max-height: 34px;
   overflow: hidden;
@@ -897,12 +969,16 @@ td small {
   display: inline-flex;
   align-items: center;
   min-height: 26px;
+  max-width: 100%;
   border-radius: 6px;
   padding: 0 10px;
   background: rgba(139, 158, 158, 0.13);
   color: #cddbd9;
   font-size: var(--text-xs);
   font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .process-chip.done {
@@ -933,14 +1009,24 @@ td small {
 .danger {
   display: grid;
   place-items: center;
-  width: 34px;
+  width: 30px;
   height: 32px;
   color: #ff9292;
 }
 
+.row-actions {
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .row-actions button:not(.danger) {
+  max-width: 42px;
   min-height: 32px;
-  padding: 0 10px;
+  padding: 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (max-width: 980px) {
