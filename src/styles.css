@@ -935,7 +935,19 @@ td small {
   overflow: hidden;
 }
 
-.part-name span {
+.part-title-button {
+  display: inline-grid;
+  justify-content: start;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #eff9f6;
+  text-align: left;
+}
+
+.part-title-button span,
+.folder-name span {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -959,6 +971,23 @@ td small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.list-subtext {
+  min-width: 0;
+}
+
+.list-link {
+  color: #69ead7;
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list-link:hover {
+  color: #95fff0;
+  text-decoration: underline;
 }
 
 .process-chips {

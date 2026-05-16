@@ -207,6 +207,34 @@ function safeHostname(value: string) {
   }
 }
 
+function normalizeExternalUrl(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (/^www\./i.test(trimmed)) return `https://${trimmed}`;
+  return "";
+}
+
+function renderLinkedValue(value: string, fallback = "") {
+  const text = value.trim();
+  if (!text) return fallback;
+  const href = normalizeExternalUrl(text);
+  if (!href) return text;
+
+  return (
+    <a
+      className="list-link"
+      href={href}
+      rel="noreferrer"
+      target="_blank"
+      title={text}
+      onClick={(event) => event.stopPropagation()}
+    >
+      {text.replace(/^https?:\/\//i, "")}
+    </a>
+  );
+}
+
 function parseItemKind(value: unknown): ItemKind {
   return value === "production" ? "production" : "bom";
 }
@@ -2117,14 +2145,29 @@ export function App() {
                             readOnly
                           />
                         </span>
-                        <button className="part-name" type="button" onClick={() => editPart(part)}>
-                          <span>{part.name}</span>
-                          <small>
+                        <div className="part-name">
+                          <button
+                            className="part-title-button"
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              editPart(part);
+                            }}
+                          >
+                            <span>{part.name}</span>
+                          </button>
+                          <small className="list-subtext">
                             {activeSection === "bom"
-                              ? `${part.vendor || "No vendor"} - ${part.location || "No location"}`
-                              : part.drawingUrl ? "Drawing linked" : "No drawing"}
+                              ? (
+                                <>
+                                  {renderLinkedValue(part.vendor, "No vendor")}
+                                  <span> - </span>
+                                  {renderLinkedValue(part.location, "No location")}
+                                </>
+                              )
+                              : part.drawingUrl ? renderLinkedValue(part.drawingUrl, "Drawing linked") : "No drawing"}
                           </small>
-                        </button>
+                        </div>
                       </div>
                     </td>
                     <td>{part.folder ? getFolderDisplayPath(part.folder, folders) || "Unknown folder" : "Root"}</td>
@@ -2132,13 +2175,13 @@ export function App() {
                     <td>
                       {activeSection === "bom" ? (
                         <>
-                          <div>{part.material}</div>
-                          <small>{part.thickness}</small>
+                          <div>{renderLinkedValue(part.material)}</div>
+                          <small>{renderLinkedValue(part.thickness)}</small>
                         </>
                       ) : (
                         <>
                           <div>{bomItems.find((item) => item.id === part.linkedBomId)?.name || "No BOM link"}</div>
-                          <small>{bomItems.find((item) => item.id === part.linkedBomId)?.material || ""}</small>
+                          <small>{renderLinkedValue(bomItems.find((item) => item.id === part.linkedBomId)?.material || "")}</small>
                         </>
                       )}
                     </td>
@@ -2157,7 +2200,7 @@ export function App() {
                       </td>
                     )}
                     {activeSection === "production" ? (
-                      <td>{part.drawingUrl ? "Linked" : "Missing"}</td>
+                      <td>{part.drawingUrl ? renderLinkedValue(part.drawingUrl, "Open") : "Missing"}</td>
                     ) : (
                       <>
                         <td>{part.quantity}</td>
