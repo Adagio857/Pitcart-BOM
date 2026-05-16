@@ -75,6 +75,10 @@ type PartDropIndicator = {
   position: "before" | "after";
 };
 
+type ListEntry =
+  | { type: "folder"; folder: FolderRecord; depth: number }
+  | { type: "part"; part: Part; depth: number };
+
 type FolderContextMenu = {
   folderId: string;
   x: number;
@@ -722,10 +726,10 @@ export function App() {
   );
   const [query, setQuery] = useState("");
   const [activeSection, setActiveSection] = useState<ItemKind>("bom");
-  const [folderFilter, setFolderFilter] = useState("All");
   const [statusFilter, setStatusFilter] = useState<"All" | ProcessStatus>("All");
   const [processFilter, setProcessFilter] = useState("All");
   const [processDraft, setProcessDraft] = useState<ProcessStep>({ name: "", status: "Not Started" });
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [draggingFolder, setDraggingFolder] = useState<string | null>(null);
   const [draggingPartId, setDraggingPartId] = useState<string | null>(null);
   const [dragPosition, setDragPosition] = useState({ x: 0, y: 0 });
@@ -845,22 +849,13 @@ export function App() {
     () => getRelevantFolders(folders, sectionItems, activeSection),
     [activeSection, folders, sectionItems]
   );
-  const visibleFolders = useMemo(() => {
-    const parentId = folderFilter === "All" ? "" : folderFilter;
-    return activeFolders.filter((folder) => folder.parentId === parentId);
-  }, [activeFolders, folderFilter]);
-  const currentFolderPath = folderFilter === "All" ? "Root" : getFolderDisplayPath(folderFilter, activeFolders) || "Folder";
   const tableColumnCount = activeSection === "production" ? 8 : 7;
-  useEffect(() => {
-    if (folderFilter !== "All" && !activeFolders.some((folder) => folder.id === folderFilter)) {
-      setFolderFilter("All");
-    }
-  }, [activeFolders, folderFilter]);
 
   useEffect(() => {
     setSelected(new Set());
     setLastSelectedPartId(null);
     setPreviewPartId(null);
+    setExpandedFolders(new Set());
   }, [activeSection]);
 
   const filteredParts = useMemo(() => {
@@ -868,13 +863,6 @@ export function App() {
 
     return parts.filter((part) => {
       if (part.itemKind !== activeSection) return false;
-      const partFolder = part.folder || "";
-      const descendantIds = folderFilter === "All" ? new Set<string>() : getFolderDescendantIds(folderFilter, folders);
-      const folderMatches = normalizedQuery
-        ? folderFilter === "All" || partFolder === folderFilter || descendantIds.has(partFolder)
-        : folderFilter === "All"
-          ? true
-          : partFolder === folderFilter;
       const statusMatches =
         activeSection === "bom" || statusFilter === "All" || part.processes.some((process) => process.status === statusFilter);
       const processMatches =
@@ -888,9 +876,40 @@ export function App() {
         !normalizedQuery ||
         Object.values(searchable).some((value) => String(value).toLowerCase().includes(normalizedQuery));
 
-      return folderMatches && statusMatches && processMatches && queryMatches;
+      return statusMatches && processMatches && queryMatches;
     });
-  }, [activeSection, folderFilter, folders, parts, processFilter, query, statusFilter]);
+  }, [activeSection, folders, parts, processFilter, query, statusFilter]);
+  const listEntries = useMemo(() => {
+    const entries: ListEntry[] = [];
+    const foldersByParent = new Map<string, FolderRecord[]>();
+    const partsByFolder = new Map<string, Part[]>();
+
+    activeFolders.forEach((folder) => {
+      const parentId = folder.parentId || "";
+      foldersByParent.set(parentId, [...(foldersByParent.get(parentId) || []), folder]);
+    });
+    filteredParts.forEach((part) => {
+      const folderId = part.folder || "";
+      partsByFolder.set(folderId, [...(partsByFolder.get(folderId) || []), part]);
+    });
+
+    function appendFolderContents(parentId: string, depth: number) {
+      (foldersByParent.get(parentId) || []).forEach((folder) => {
+        entries.push({ type: "folder", folder, depth });
+        if (expandedFolders.has(folder.id)) appendFolderContents(folder.id, depth + 1);
+      });
+      (partsByFolder.get(parentId) || []).forEach((part) => {
+        entries.push({ type: "part", part, depth });
+      });
+    }
+
+    appendFolderContents("", 0);
+    return entries;
+  }, [activeFolders, expandedFolders, filteredParts]);
+  const visibleParts = useMemo(
+    () => listEntries.filter((entry): entry is Extract<ListEntry, { type: "part" }> => entry.type === "part").map((entry) => entry.part),
+    [listEntries]
+  );
 
   const totalValue = bomItems.reduce((sum, part) => sum + part.quantity * part.unitPrice, 0);
   const lowStockCount = bomItems.filter((part) => part.quantity <= 2).length;
@@ -929,7 +948,7 @@ export function App() {
     setProcessDraft({ name: "", status: "Not Started" });
   }
 
-  async function createFolder(parent = folderFilter) {
+  async function createFolder(parent = "") {
     const folderName = window.prompt("Folder name");
     const draft = normalizeFolderPath(folderName || "");
     if (!draft) return;
@@ -942,8 +961,12 @@ export function App() {
     });
     if (newFolders.length === 0) return;
     const nextFolders = [...folders, ...newFolders];
-    const createdFolderId = newFolders[newFolders.length - 1].id;
-    setFolderFilter(createdFolderId);
+    setExpandedFolders((current) => {
+      const next = new Set(current);
+      if (parentId) next.add(parentId);
+      newFolders.slice(0, -1).forEach((folder) => next.add(folder.id));
+      return next;
+    });
     persist(parts, nextFolders);
   }
 
@@ -964,10 +987,12 @@ export function App() {
     const nextParts = parts.map((part) => (affectedFolderIds.has(part.folder) ? { ...part, folder: parentId } : part));
     const nextFolders = folders.filter((candidate) => !affectedFolderIds.has(candidate.id));
 
-    const saved = persist(nextParts, nextFolders);
-    if (saved && affectedFolderIds.has(folderFilter)) {
-      setFolderFilter(parent);
-    }
+    persist(nextParts, nextFolders);
+    setExpandedFolders((current) => {
+      const next = new Set(current);
+      affectedFolderIds.forEach((id) => next.delete(id));
+      return next;
+    });
   }
 
   async function moveFolder(folderId: string, targetParent: string) {
@@ -988,6 +1013,11 @@ export function App() {
       ...foldersWithoutMoved.slice(insertIndex)
     ]);
     persist(parts, nextFolders);
+    setExpandedFolders((current) => {
+      const next = new Set(current);
+      if (parentId) next.add(parentId);
+      return next;
+    });
   }
 
   async function moveFolderToPosition(folderId: string, targetFolderId: string, position: FolderDropPosition) {
@@ -1081,8 +1111,13 @@ export function App() {
     const nextFolders = folders
       .filter((candidate) => candidate.id !== folderId)
       .map((candidate) => candidate.parentId === folderId ? { ...candidate, parentId } : candidate);
-    const saved = persist(nextParts, nextFolders);
-    if (saved) setFolderFilter(parent);
+    persist(nextParts, nextFolders);
+    setExpandedFolders((current) => {
+      const next = new Set(current);
+      next.delete(folderId);
+      if (parentId) next.add(parentId);
+      return next;
+    });
   }
 
   function getFolderDropPosition(event: DragEvent<HTMLElement>, allowInsert = true): FolderDropPosition {
@@ -1195,6 +1230,15 @@ export function App() {
     return parts.filter((part) => part.itemKind === activeSection && (part.folder || "") === folderId).length;
   }
 
+  function toggleFolderExpanded(folderId: string) {
+    setExpandedFolders((current) => {
+      const next = new Set(current);
+      if (next.has(folderId)) next.delete(folderId);
+      else next.add(folderId);
+      return next;
+    });
+  }
+
   function openFolderContextMenu(event: MouseEvent<HTMLElement>, folderId: string) {
     event.preventDefault();
     event.stopPropagation();
@@ -1263,7 +1307,7 @@ export function App() {
         linkedBomId: nextItemKind === "production" ? form.linkedBomId : "",
         partNumber: nextItemKind === "production" ? visiblePartNumber : "",
         originalPartNumber: nextItemKind === "production" ? form.originalPartNumber || generatedPartNumber : "",
-        folder: editingId ? form.folder : folderFilter === "All" ? "" : folderFilter
+        folder: editingId ? form.folder : ""
       },
       editingId ?? undefined
     );
@@ -1414,13 +1458,13 @@ export function App() {
   }
 
   function selectPartRange(anchorId: string, targetId: string) {
-    const anchorIndex = filteredParts.findIndex((part) => part.id === anchorId);
-    const targetIndex = filteredParts.findIndex((part) => part.id === targetId);
+    const anchorIndex = visibleParts.findIndex((part) => part.id === anchorId);
+    const targetIndex = visibleParts.findIndex((part) => part.id === targetId);
     if (anchorIndex < 0 || targetIndex < 0) return [targetId];
 
     const start = Math.min(anchorIndex, targetIndex);
     const end = Math.max(anchorIndex, targetIndex);
-    return filteredParts.slice(start, end + 1).map((part) => part.id);
+    return visibleParts.slice(start, end + 1).map((part) => part.id);
   }
 
   function selectPartLikeFileManager(id: string, event: MouseEvent) {
@@ -1472,10 +1516,10 @@ export function App() {
   }
 
   function toggleAllFiltered() {
-    const allSelected = filteredParts.length > 0 && filteredParts.every((part) => selected.has(part.id));
+    const allSelected = visibleParts.length > 0 && visibleParts.every((part) => selected.has(part.id));
     setSelected((current) => {
       const next = new Set(current);
-      filteredParts.forEach((part) => {
+      visibleParts.forEach((part) => {
         if (allSelected) next.delete(part.id);
         else next.add(part.id);
       });
@@ -1863,16 +1907,11 @@ export function App() {
           <div className="table-heading">
             <div className="list-heading">
               <span>
-                {activeSection === "bom" ? "Bill of Materials" : "Production Tracker"} ({filteredParts.length + visibleFolders.length} item(s))
+                {activeSection === "bom" ? "Bill of Materials" : "Production Tracker"} ({listEntries.length} visible item(s))
               </span>
-              <small>{currentFolderPath}</small>
+              <small>{sectionItems.length} total item(s)</small>
             </div>
             <div>
-              {folderFilter !== "All" && (
-                <button className="ghost" type="button" onClick={() => setFolderFilter(getParentFolder(folderFilter, activeFolders))}>
-                  Up
-                </button>
-              )}
               <button className="ghost" type="button" onClick={() => void createFolder()}>
                 <Plus size={14} />
                 New folder
@@ -1892,7 +1931,7 @@ export function App() {
           <div
             className="table-scroll"
             onDragOver={(event) => event.preventDefault()}
-            onDrop={(event) => handleFolderDrop(event, folderFilter)}
+            onDrop={(event) => handleFolderDrop(event, "All")}
           >
             <table>
               <thead>
@@ -1913,8 +1952,14 @@ export function App() {
                 </tr>
               </thead>
               <tbody>
-                {visibleFolders.map((folder) => {
+                {listEntries.map((entry) => {
+                  if (entry.type === "folder") {
+                    const { folder, depth } = entry;
                   const dropPosition = folderDropIndicator?.path === folder.id ? folderDropIndicator.position : null;
+                  const isExpanded = expandedFolders.has(folder.id);
+                  const hasChildren =
+                    activeFolders.some((candidate) => candidate.parentId === folder.id) ||
+                    filteredParts.some((part) => part.folder === folder.id);
                   return (
                     <tr
                       className={[
@@ -1924,7 +1969,6 @@ export function App() {
                       ].filter(Boolean).join(" ")}
                       draggable
                       key={folder.id}
-                      onClick={() => setFolderFilter(folder.id)}
                       onContextMenu={(event) => openFolderContextMenu(event, folder.id)}
                       onDragStart={(event) => {
                         event.dataTransfer.effectAllowed = "move";
@@ -1940,20 +1984,35 @@ export function App() {
                       onDragEnd={clearDragState}
                     >
                       <td></td>
-                      <td>
+                      <td style={{ paddingLeft: `${12 + depth * 22}px` }}>
                         <button className="part-name folder-name" type="button">
                           <span><Folder size={15} /> {folder.name}</span>
                           <small>{getFolderDirectCount(folder.id)} direct item(s)</small>
                         </button>
                       </td>
                       <td>Folder</td>
-                      <td colSpan={tableColumnCount - 3}>
+                      <td colSpan={tableColumnCount - 4}>
                         {getFolderDisplayPath(folder.id, activeFolders)}
+                      </td>
+                      <td>
+                        <button
+                          className="icon-button folder-expand-button"
+                          disabled={!hasChildren}
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            toggleFolderExpanded(folder.id);
+                          }}
+                          title={isExpanded ? "Collapse folder" : "Expand folder"}
+                        >
+                          {isExpanded ? "v" : ">"}
+                        </button>
                       </td>
                     </tr>
                   );
-                })}
-                {filteredParts.map((part) => {
+                  }
+
+                  const { part, depth } = entry;
                   const partDropPosition = partDropIndicator?.id === part.id ? partDropIndicator.position : null;
                   return (
                   <tr
@@ -1967,7 +2026,7 @@ export function App() {
                     onDragStart={(event) => {
                       event.dataTransfer.effectAllowed = "move";
                       const draggedIds = selected.has(part.id)
-                        ? filteredParts.filter((candidate) => selected.has(candidate.id)).map((candidate) => candidate.id)
+                        ? visibleParts.filter((candidate) => selected.has(candidate.id)).map((candidate) => candidate.id)
                         : [part.id];
                       event.dataTransfer.setData(
                         "application/json",
@@ -1996,7 +2055,7 @@ export function App() {
                         readOnly
                       />
                     </td>
-                    <td>
+                    <td style={{ paddingLeft: `${12 + depth * 22}px` }}>
                       <button className="part-name" type="button" onClick={() => editPart(part)}>
                         <span>{part.name}</span>
                         <small>
