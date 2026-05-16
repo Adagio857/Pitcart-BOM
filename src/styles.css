@@ -801,8 +801,32 @@ tbody tr.folder-list-row:hover {
   content: "";
 }
 
+.tree-end-mask {
+  display: none;
+}
+
+.tree-last-entry .tree-end-mask {
+  position: absolute;
+  top: 50%;
+  bottom: -1px;
+  left: calc((var(--tree-depth) * var(--tree-indent)) - 12px);
+  display: block;
+  width: 5px;
+  background: #0c1a1c;
+  content: "";
+}
+
+.folder-list-row .tree-end-mask {
+  background: #0a1719;
+}
+
+.folder-list-row:hover .tree-end-mask {
+  background: #0b2a28;
+}
+
 .tree-root-cell .tree-guides::before,
-.tree-root-cell .tree-guides::after {
+.tree-root-cell .tree-guides::after,
+.tree-root-cell .tree-end-mask {
   display: none;
 }
 

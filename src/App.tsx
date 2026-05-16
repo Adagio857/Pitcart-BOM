@@ -76,8 +76,8 @@ type PartDropIndicator = {
 };
 
 type ListEntry =
-  | { type: "folder"; folder: FolderRecord; depth: number }
-  | { type: "part"; part: Part; depth: number };
+  | { type: "folder"; folder: FolderRecord; depth: number; isLast: boolean }
+  | { type: "part"; part: Part; depth: number; isLast: boolean };
 
 type FolderContextMenu = {
   folderId: string;
@@ -894,12 +894,19 @@ export function App() {
     });
 
     function appendFolderContents(parentId: string, depth: number) {
-      (foldersByParent.get(parentId) || []).forEach((folder) => {
-        entries.push({ type: "folder", folder, depth });
+      const childFolders = foldersByParent.get(parentId) || [];
+      const childParts = partsByFolder.get(parentId) || [];
+      const childCount = childFolders.length + childParts.length;
+      let childIndex = 0;
+
+      childFolders.forEach((folder) => {
+        entries.push({ type: "folder", folder, depth, isLast: childIndex === childCount - 1 });
+        childIndex += 1;
         if (expandedFolders.has(folder.id)) appendFolderContents(folder.id, depth + 1);
       });
-      (partsByFolder.get(parentId) || []).forEach((part) => {
-        entries.push({ type: "part", part, depth });
+      childParts.forEach((part) => {
+        entries.push({ type: "part", part, depth, isLast: childIndex === childCount - 1 });
+        childIndex += 1;
       });
     }
 
@@ -1954,7 +1961,7 @@ export function App() {
               <tbody>
                 {listEntries.map((entry) => {
                   if (entry.type === "folder") {
-                    const { folder, depth } = entry;
+                    const { folder, depth, isLast } = entry;
                   const dropPosition = folderDropIndicator?.path === folder.id ? folderDropIndicator.position : null;
                   const isExpanded = expandedFolders.has(folder.id);
                   const hasChildren =
@@ -1985,10 +1992,17 @@ export function App() {
                     >
                       <td colSpan={2}>
                         <div
-                          className={`tree-cell folder-tree-cell ${depth === 0 ? "tree-root-cell" : ""}`}
+                          className={[
+                            "tree-cell",
+                            "folder-tree-cell",
+                            depth === 0 ? "tree-root-cell" : "",
+                            isLast ? "tree-last-entry" : ""
+                          ].filter(Boolean).join(" ")}
                           style={{ "--tree-depth": depth } as CSSProperties}
                         >
-                          <span className="tree-guides" aria-hidden="true" />
+                          <span className="tree-guides" aria-hidden="true">
+                            <span className="tree-end-mask" />
+                          </span>
                           <button
                             className="icon-button folder-expand-button"
                             disabled={!hasChildren}
@@ -2011,7 +2025,7 @@ export function App() {
                   );
                   }
 
-                  const { part, depth } = entry;
+                  const { part, depth, isLast } = entry;
                   const partDropPosition = partDropIndicator?.id === part.id ? partDropIndicator.position : null;
                   return (
                   <tr
@@ -2047,10 +2061,16 @@ export function App() {
                   >
                     <td colSpan={2}>
                       <div
-                        className={`tree-cell ${depth === 0 ? "tree-root-cell" : ""}`}
+                        className={[
+                          "tree-cell",
+                          depth === 0 ? "tree-root-cell" : "",
+                          isLast ? "tree-last-entry" : ""
+                        ].filter(Boolean).join(" ")}
                         style={{ "--tree-depth": depth } as CSSProperties}
                       >
-                        <span className="tree-guides" aria-hidden="true" />
+                        <span className="tree-guides" aria-hidden="true">
+                          <span className="tree-end-mask" />
+                        </span>
                         <span className="tree-select-slot">
                           <input
                             aria-label={`Select ${part.name}`}
