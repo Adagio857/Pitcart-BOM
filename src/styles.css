@@ -716,8 +716,6 @@ tbody tr.folder-list-row:hover {
 }
 
 .folder-expand-button {
-  position: sticky;
-  left: 40px;
   z-index: 3;
   flex: 0 0 28px;
   width: 28px;
@@ -729,32 +727,40 @@ tbody tr.folder-list-row:hover {
 
 .tree-cell {
   --tree-depth: 0;
+  --tree-indent: 22px;
   position: relative;
   display: grid;
-  grid-template-columns: calc(var(--tree-depth) * 22px) 28px minmax(0, 1fr);
+  grid-template-columns: calc(var(--tree-depth) * var(--tree-indent)) 28px 28px minmax(0, 1fr);
   align-items: center;
   gap: 7px;
   min-width: max-content;
 }
 
+.tree-select-slot {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+}
+
 .tree-guides {
   position: relative;
   align-self: stretch;
-  min-height: 40px;
+  min-height: 44px;
 }
 
 .tree-guides::before {
   position: absolute;
-  inset: -12px 0 -12px 0;
-  width: calc(var(--tree-depth) * 22px);
+  inset: -16px 0 -16px 0;
+  width: calc(var(--tree-depth) * var(--tree-indent));
   background-image: repeating-linear-gradient(
     to right,
     transparent 0,
     transparent 10px,
-    rgba(126, 154, 153, 0.24) 10px,
-    rgba(126, 154, 153, 0.24) 11px,
+    rgba(126, 154, 153, 0.28) 10px,
+    rgba(126, 154, 153, 0.28) 11px,
     transparent 11px,
-    transparent 22px
+    transparent var(--tree-indent)
   );
   content: "";
 }
@@ -765,18 +771,22 @@ tbody tr.folder-list-row:hover {
   top: 50%;
   width: 12px;
   height: 1px;
-  background: rgba(126, 154, 153, 0.24);
+  background: rgba(126, 154, 153, 0.28);
   content: "";
 }
 
-.tree-cell[style*="--tree-depth: 0"] .tree-guides::before,
-.tree-cell[style*="--tree-depth: 0"] .tree-guides::after {
+.tree-root-cell .tree-guides::before,
+.tree-root-cell .tree-guides::after {
   display: none;
 }
 
 .tree-spacer {
   width: 28px;
   height: 28px;
+}
+
+.folder-tree-cell {
+  min-height: 44px;
 }
 
 tbody tr.drop-before td {
