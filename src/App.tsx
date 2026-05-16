@@ -184,6 +184,14 @@ function buildScriptUrl(webAppUrl: string, params: Record<string, string>) {
   return url.toString();
 }
 
+function initialSheetWebAppUrl() {
+  return DEFAULT_APPS_SCRIPT_URL || localStorage.getItem(SHEET_WEB_APP_URL_KEY) || "";
+}
+
+function initialGoogleSheetUrl() {
+  return DEFAULT_SHEET_URL || localStorage.getItem(SHEET_URL_KEY) || "";
+}
+
 function makeFolderId() {
   return `folder-${crypto.randomUUID()}`;
 }
@@ -706,14 +714,10 @@ export function App() {
   const [folderRecords, setFolderRecords] = useState<FolderRecord[]>(cachedWorkspace.folders);
   const [form, setForm] = useState<PartForm>(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [sheetWebAppUrl, setSheetWebAppUrl] = useState(
-    () => localStorage.getItem(SHEET_WEB_APP_URL_KEY) || DEFAULT_APPS_SCRIPT_URL
-  );
-  const [sheetUrlDraft, setSheetUrlDraft] = useState(
-    () => localStorage.getItem(SHEET_WEB_APP_URL_KEY) || DEFAULT_APPS_SCRIPT_URL
-  );
-  const [sheetUrl, setSheetUrl] = useState(() => localStorage.getItem(SHEET_URL_KEY) || DEFAULT_SHEET_URL);
-  const [sheetLinkDraft, setSheetLinkDraft] = useState(() => localStorage.getItem(SHEET_URL_KEY) || DEFAULT_SHEET_URL);
+  const [sheetWebAppUrl, setSheetWebAppUrl] = useState(initialSheetWebAppUrl);
+  const [sheetUrlDraft, setSheetUrlDraft] = useState(initialSheetWebAppUrl);
+  const [sheetUrl, setSheetUrl] = useState(initialGoogleSheetUrl);
+  const [sheetLinkDraft, setSheetLinkDraft] = useState(initialGoogleSheetUrl);
   const [isSheetLoading, setIsSheetLoading] = useState(false);
   const [hasPendingSync, setHasPendingSync] = useState(cachedWorkspace.dirty);
   const [sheetMessage, setSheetMessage] = useState(
@@ -721,7 +725,9 @@ export function App() {
       ? cachedWorkspace.dirty
         ? "Loaded local changes. Sync is pending."
         : "Loaded local cache."
-      : "Connect the Google Apps Script web app to load parts."
+      : sheetWebAppUrl
+        ? "Google Sheet connection ready."
+        : "Connect the Google Apps Script web app to load parts."
   );
   const [query, setQuery] = useState("");
   const [activeSection, setActiveSection] = useState<ItemKind>("bom");
@@ -738,6 +744,19 @@ export function App() {
   const [previewPartId, setPreviewPartId] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [lastSelectedPartId, setLastSelectedPartId] = useState<string | null>(null);
+  const hasConfiguredSheetConnection = Boolean(DEFAULT_APPS_SCRIPT_URL);
+
+  useEffect(() => {
+    if (!DEFAULT_APPS_SCRIPT_URL) return;
+    localStorage.setItem(SHEET_WEB_APP_URL_KEY, DEFAULT_APPS_SCRIPT_URL);
+    setSheetWebAppUrl(DEFAULT_APPS_SCRIPT_URL);
+    setSheetUrlDraft(DEFAULT_APPS_SCRIPT_URL);
+    if (DEFAULT_SHEET_URL) {
+      localStorage.setItem(SHEET_URL_KEY, DEFAULT_SHEET_URL);
+      setSheetUrl(DEFAULT_SHEET_URL);
+      setSheetLinkDraft(DEFAULT_SHEET_URL);
+    }
+  }, []);
 
   useEffect(() => {
     if (sheetWebAppUrl) {
@@ -1596,28 +1615,38 @@ export function App() {
       </section>
 
       <section className="sheet-panel">
-        <form className="sheet-form" onSubmit={connectSheet}>
-          <label>
-            Apps Script web app URL
-            <input
-              placeholder="https://script.google.com/macros/s/.../exec"
-              value={sheetUrlDraft}
-              onChange={(event) => setSheetUrlDraft(event.target.value)}
-            />
-          </label>
-          <label>
-            Google Sheet URL
-            <input
-              placeholder="https://docs.google.com/spreadsheets/d/..."
-              value={sheetLinkDraft}
-              onChange={(event) => setSheetLinkDraft(event.target.value)}
-            />
-          </label>
-          <button className="button primary" type="submit">
-            <Database size={16} />
-            Connect
-          </button>
-        </form>
+        {hasConfiguredSheetConnection ? (
+          <div className="sheet-connection">
+            <Database size={18} />
+            <div>
+              <strong>Google Sheet connected</strong>
+              <span>Apps Script sync is configured for this app.</span>
+            </div>
+          </div>
+        ) : (
+          <form className="sheet-form" onSubmit={connectSheet}>
+            <label>
+              Apps Script web app URL
+              <input
+                placeholder="https://script.google.com/macros/s/.../exec"
+                value={sheetUrlDraft}
+                onChange={(event) => setSheetUrlDraft(event.target.value)}
+              />
+            </label>
+            <label>
+              Google Sheet URL
+              <input
+                placeholder="https://docs.google.com/spreadsheets/d/..."
+                value={sheetLinkDraft}
+                onChange={(event) => setSheetLinkDraft(event.target.value)}
+              />
+            </label>
+            <button className="button primary" type="submit">
+              <Database size={16} />
+              Connect
+            </button>
+          </form>
+        )}
         <div className="sheet-status">
           <span>{hasPendingSync ? "Unsynced local changes" : "Synced"} - {sheetMessage}</span>
           <a

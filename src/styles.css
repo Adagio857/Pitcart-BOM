@@ -194,6 +194,35 @@ h2 {
   align-items: end;
 }
 
+.sheet-connection {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  color: #edf6f3;
+}
+
+.sheet-connection svg {
+  flex: 0 0 auto;
+  color: #69ead7;
+}
+
+.sheet-connection div {
+  display: grid;
+  gap: 3px;
+}
+
+.sheet-connection strong {
+  font-size: var(--text-sm);
+  line-height: 1.2;
+}
+
+.sheet-connection span {
+  color: #8da5a4;
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
 .sheet-status {
   display: grid;
   gap: 5px;

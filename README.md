@@ -44,7 +44,7 @@ To bake the Apps Script URL and Sheet URL into the deployed app, add GitHub repo
 - `VITE_APPS_SCRIPT_URL`
 - `VITE_GOOGLE_SHEET_URL`
 
-The connection panel can still override those values in the browser if needed.
+When those values are configured, the app connects to the Google Sheet automatically on load. The manual connection form only appears for an unconfigured local copy.
 
 ## Google Sheet Setup
 
@@ -58,7 +58,7 @@ The connection panel can still override those values in the browser if needed.
 8. Deploy and copy the `/exec` web app URL.
 9. Add that `/exec` URL to `.env.local` for local development or to the GitHub repository variable `VITE_APPS_SCRIPT_URL` for Pages.
 10. Add your Google Sheet URL to `.env.local` or to `VITE_GOOGLE_SHEET_URL`.
-11. The connection panel will prefill from those values. Click **Connect** if you change them in the UI.
+11. Reload the app. It will show the Google Sheet as connected without asking for the Apps Script link again.
 
 The script creates/uses a `Parts` tab for part rows and a `Folders` tab for folder-only organization paths.
 
