@@ -11,6 +11,7 @@ import {
   RotateCcw,
   Search,
   Trash2,
+  Undo2,
   Upload,
   X
 } from "lucide-react";
@@ -92,8 +93,16 @@ type FolderContextMenu = {
   y: number;
 };
 
+type UndoSnapshot = {
+  parts: Part[];
+  folders: FolderRecord[];
+  deletedPartIds: string[];
+  deletedFolderIds: string[];
+};
+
 const WORKSPACE_CACHE_KEY = "parts-tracker.workspaceCache.v1";
 const SYNC_INTERVAL_MS = 30000;
+const MAX_UNDO_STEPS = 30;
 const FIREBASE_WORKSPACE_ID = import.meta.env.VITE_FIREBASE_WORKSPACE_ID || "parts-tracker";
 const FIREBASE_ATTACHMENT_CHUNK_SIZE = 700_000;
 const firebaseConfig = {
@@ -209,6 +218,7 @@ type WorkspaceCache = {
   folders: LegacyFolder[];
   dirty: boolean;
   deletedPartIds?: string[];
+  deletedFolderIds?: string[];
   updatedAt: string;
 };
 
@@ -372,9 +382,15 @@ function migratePartFolder(part: Part, idByPath: Map<string, string>, folderIds:
   return { ...part, folder: idByPath.get(`${part.itemKind}:${normalizedPath}`) || idByPath.get(`bom:${normalizedPath}`) || "" };
 }
 
-function loadWorkspaceCache(): { parts: Part[]; folders: FolderRecord[]; dirty: boolean; deletedPartIds: string[] } {
+function loadWorkspaceCache(): {
+  parts: Part[];
+  folders: FolderRecord[];
+  dirty: boolean;
+  deletedPartIds: string[];
+  deletedFolderIds: string[];
+} {
   const saved = localStorage.getItem(WORKSPACE_CACHE_KEY);
-  if (!saved) return { parts: [], folders: [], dirty: false, deletedPartIds: [] };
+  if (!saved) return { parts: [], folders: [], dirty: false, deletedPartIds: [], deletedFolderIds: [] };
 
   try {
     const cache = JSON.parse(saved) as WorkspaceCache;
@@ -385,19 +401,27 @@ function loadWorkspaceCache(): { parts: Part[]; folders: FolderRecord[]; dirty: 
       parts,
       folders,
       dirty: Boolean(cache.dirty),
-      deletedPartIds: Array.isArray(cache.deletedPartIds) ? cache.deletedPartIds.filter(Boolean) : []
+      deletedPartIds: Array.isArray(cache.deletedPartIds) ? cache.deletedPartIds.filter(Boolean) : [],
+      deletedFolderIds: Array.isArray(cache.deletedFolderIds) ? cache.deletedFolderIds.filter(Boolean) : []
     };
   } catch {
-    return { parts: [], folders: [], dirty: false, deletedPartIds: [] };
+    return { parts: [], folders: [], dirty: false, deletedPartIds: [], deletedFolderIds: [] };
   }
 }
 
-function saveWorkspaceCache(parts: Part[], folders: FolderRecord[], dirty: boolean, deletedPartIds: string[] = []) {
+function saveWorkspaceCache(
+  parts: Part[],
+  folders: FolderRecord[],
+  dirty: boolean,
+  deletedPartIds: string[] = [],
+  deletedFolderIds: string[] = []
+) {
   const cache: WorkspaceCache = {
     parts: dirty ? parts : stripLocalAttachmentData(parts),
     folders,
     dirty,
     deletedPartIds,
+    deletedFolderIds,
     updatedAt: new Date().toISOString()
   };
   localStorage.setItem(WORKSPACE_CACHE_KEY, JSON.stringify(cache));
@@ -654,12 +678,16 @@ function reconcileWorkspaceForSync(
   remoteParts: Part[],
   localFolders: FolderRecord[],
   remoteFolders: FolderRecord[],
-  deletedPartIds: string[] = []
+  deletedPartIds: string[] = [],
+  deletedFolderIds: string[] = []
 ) {
   const remoteById = new Map(remoteParts.map((part) => [part.id, part]));
   const localById = new Map(localParts.map((part) => [part.id, part]));
   const deletedPartIdSet = new Set(deletedPartIds);
-  const mergedParts = remoteParts.filter((part) => !localById.has(part.id) && !deletedPartIdSet.has(part.id));
+  const deletedFolderIdSet = new Set(deletedFolderIds);
+  const mergedParts = remoteParts
+    .filter((part) => !localById.has(part.id) && !deletedPartIdSet.has(part.id))
+    .map((part) => (deletedFolderIdSet.has(part.folder) ? { ...part, folder: "" } : part));
   const usedPartNumbers = new Set(
     mergedParts.filter((part) => part.itemKind === "production").map((part) => part.partNumber).filter(Boolean)
   );
@@ -694,9 +722,9 @@ function reconcileWorkspaceForSync(
   });
 
   const mergedFolders = uniqueFoldersById([
-    ...remoteFolders,
-    ...localFolders,
-  ]).filter((folder) => mergedParts.some((part) => part.folder === folder.id) || localFolders.some((local) => local.id === folder.id) || remoteFolders.some((remote) => remote.id === folder.id));
+    ...remoteFolders.filter((folder) => !deletedFolderIdSet.has(folder.id)),
+    ...localFolders
+  ]);
 
   return { parts: mergedParts, folders: mergedFolders, renumberedCount };
 }
@@ -826,6 +854,7 @@ function formToPart(form: PartForm, id: string = crypto.randomUUID()): Part {
 
 export function App() {
   const workspaceRef = useRef<HTMLElement | null>(null);
+  const undoStackRef = useRef<UndoSnapshot[]>([]);
   const cachedWorkspace = useMemo(loadWorkspaceCache, []);
   const [parts, setParts] = useState<Part[]>(cachedWorkspace.parts);
   const [folderRecords, setFolderRecords] = useState<FolderRecord[]>(cachedWorkspace.folders);
@@ -836,6 +865,7 @@ export function App() {
   const [hasPendingSync, setHasPendingSync] = useState(cachedWorkspace.dirty);
   const [syncRetryBlocked, setSyncRetryBlocked] = useState(false);
   const [deletedPartIds, setDeletedPartIds] = useState<string[]>(cachedWorkspace.deletedPartIds);
+  const [deletedFolderIds, setDeletedFolderIds] = useState<string[]>(cachedWorkspace.deletedFolderIds);
   const [backendMessage, setBackendMessage] = useState(
     cachedWorkspace.parts.length
       ? cachedWorkspace.dirty
@@ -863,6 +893,7 @@ export function App() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [lastSelectedPartId, setLastSelectedPartId] = useState<string | null>(null);
   const [panelWidths, setPanelWidths] = useState({ editor: 380 });
+  const [undoCount, setUndoCount] = useState(0);
 
   useEffect(() => {
     if (firebaseReady) {
@@ -878,7 +909,21 @@ export function App() {
     }, SYNC_INTERVAL_MS);
 
     return () => window.clearTimeout(timer);
-  }, [deletedPartIds, firebaseReady, folderRecords, hasPendingSync, isBackendLoading, parts, syncRetryBlocked]);
+  }, [deletedFolderIds, deletedPartIds, firebaseReady, folderRecords, hasPendingSync, isBackendLoading, parts, syncRetryBlocked]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      const isEditableTarget = Boolean(target?.closest("input, textarea, select, [contenteditable='true']"));
+      if (isEditableTarget) return;
+      if (event.key.toLowerCase() !== "z" || !(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      undoLastAction();
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [firebaseReady]);
 
   async function refreshFromBackend() {
     if (!firebaseReady) {
@@ -896,10 +941,13 @@ export function App() {
       setParts(nextParts);
       setFolderRecords(nextFolders);
       setDeletedPartIds([]);
+      setDeletedFolderIds([]);
       saveWorkspaceCache(nextParts, nextFolders, false);
       setHasPendingSync(false);
       setSyncRetryBlocked(false);
       setSelected(new Set());
+      undoStackRef.current = [];
+      setUndoCount(0);
       setPreviewPartId((current) => (nextParts.some((part) => part.id === current) ? current : null));
       setBackendMessage(`Loaded ${nextParts.length} parts from Firebase.`);
     } catch (error) {
@@ -909,15 +957,53 @@ export function App() {
     }
   }
 
-  function persist(nextParts: Part[], nextFolders = folderRecords, nextDeletedPartIds = deletedPartIds) {
+  function persist(
+    nextParts: Part[],
+    nextFolders = folderRecords,
+    nextDeletedPartIds = deletedPartIds,
+    nextDeletedFolderIds = deletedFolderIds
+  ) {
+    undoStackRef.current = [
+      ...undoStackRef.current.slice(-(MAX_UNDO_STEPS - 1)),
+      {
+        parts,
+        folders: folderRecords,
+        deletedPartIds,
+        deletedFolderIds
+      }
+    ];
+    setUndoCount(undoStackRef.current.length);
     setParts(nextParts);
     setFolderRecords(nextFolders);
     setDeletedPartIds(nextDeletedPartIds);
+    setDeletedFolderIds(nextDeletedFolderIds);
     setHasPendingSync(true);
     setSyncRetryBlocked(false);
-    saveWorkspaceCache(nextParts, nextFolders, true, nextDeletedPartIds);
+    saveWorkspaceCache(nextParts, nextFolders, true, nextDeletedPartIds, nextDeletedFolderIds);
     setBackendMessage(firebaseReady ? "Saved locally. Firebase sync pending." : "Saved locally. Firebase is not configured.");
     return true;
+  }
+
+  function undoLastAction() {
+    const snapshot = undoStackRef.current[undoStackRef.current.length - 1];
+    if (!snapshot) {
+      setBackendMessage("Nothing to undo.");
+      return;
+    }
+
+    undoStackRef.current = undoStackRef.current.slice(0, -1);
+    setUndoCount(undoStackRef.current.length);
+    setParts(snapshot.parts);
+    setFolderRecords(snapshot.folders);
+    setDeletedPartIds(snapshot.deletedPartIds);
+    setDeletedFolderIds(snapshot.deletedFolderIds);
+    setHasPendingSync(true);
+    setSyncRetryBlocked(false);
+    setSelected(new Set());
+    setLastSelectedPartId(null);
+    setPreviewPartId((current) => (snapshot.parts.some((part) => part.id === current) ? current : null));
+    saveWorkspaceCache(snapshot.parts, snapshot.folders, true, snapshot.deletedPartIds, snapshot.deletedFolderIds);
+    setBackendMessage(firebaseReady ? "Undid last action. Firebase sync pending." : "Undid last action locally. Firebase is not configured.");
   }
 
   async function syncToBackend() {
@@ -935,7 +1021,8 @@ export function App() {
         remoteWorkspace.parts,
         folderRecords,
         remoteWorkspace.folders,
-        deletedPartIds
+        deletedPartIds,
+        deletedFolderIds
       );
 
       setBackendMessage("Syncing local changes to Firebase...");
@@ -943,6 +1030,7 @@ export function App() {
       setParts(reconciled.parts);
       setFolderRecords(reconciled.folders);
       setDeletedPartIds([]);
+      setDeletedFolderIds([]);
       saveWorkspaceCache(reconciled.parts, reconciled.folders, false);
       setHasPendingSync(false);
       setSyncRetryBlocked(false);
@@ -1148,8 +1236,9 @@ export function App() {
 
     const nextParts = parts.map((part) => (affectedFolderIds.has(part.folder) ? { ...part, folder: parentId } : part));
     const nextFolders = folders.filter((candidate) => !affectedFolderIds.has(candidate.id));
+    const nextDeletedFolderIds = Array.from(new Set([...deletedFolderIds, ...affectedFolderIds]));
 
-    persist(nextParts, nextFolders);
+    persist(nextParts, nextFolders, deletedPartIds, nextDeletedFolderIds);
     setExpandedFolders((current) => {
       const next = new Set(current);
       affectedFolderIds.forEach((id) => next.delete(id));
@@ -1273,7 +1362,8 @@ export function App() {
     const nextFolders = folders
       .filter((candidate) => candidate.id !== folderId)
       .map((candidate) => candidate.parentId === folderId ? { ...candidate, parentId } : candidate);
-    persist(nextParts, nextFolders);
+    const nextDeletedFolderIds = Array.from(new Set([...deletedFolderIds, folderId]));
+    persist(nextParts, nextFolders, deletedPartIds, nextDeletedFolderIds);
     setExpandedFolders((current) => {
       const next = new Set(current);
       next.delete(folderId);
@@ -1787,7 +1877,7 @@ export function App() {
             Unpack
           </button>
           <button
-            className="danger"
+            className="context-danger"
             type="button"
             onClick={() => {
               void removeFolder(folderContextMenu.folderId);
@@ -1817,6 +1907,16 @@ export function App() {
           >
             <RefreshCw size={16} />
             Refresh
+          </button>
+          <button
+            className="button secondary"
+            disabled={undoCount === 0}
+            type="button"
+            onClick={undoLastAction}
+            title="Undo last action"
+          >
+            <Undo2 size={16} />
+            Undo
           </button>
           <button
             className="button secondary"

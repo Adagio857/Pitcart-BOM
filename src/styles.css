@@ -540,7 +540,7 @@ textarea:focus {
   background: rgba(0, 136, 117, 0.22);
 }
 
-.context-menu button.danger {
+.context-menu button.context-danger {
   color: #ff9b9b;
 }
 
