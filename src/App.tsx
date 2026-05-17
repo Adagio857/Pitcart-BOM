@@ -15,6 +15,8 @@ import {
   X
 } from "lucide-react";
 import { ChangeEvent, CSSProperties, DragEvent, FormEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import { initializeApp, type FirebaseApp } from "firebase/app";
+import { collection, doc, getDocs, getFirestore, serverTimestamp, setDoc, writeBatch, type Firestore, type WriteBatch } from "firebase/firestore";
 
 type ProcessStatus = "Not Started" | "Queued" | "In Progress" | "Done" | "Blocked" | "Outsourced";
 
@@ -92,10 +94,19 @@ type FolderContextMenu = {
 
 const WORKSPACE_CACHE_KEY = "parts-tracker.workspaceCache.v1";
 const SYNC_INTERVAL_MS = 30000;
-const SYNC_CHUNK_SIZE = 1200;
-const SHARED_APPS_SCRIPT_URL =
-  "https://script.google.com/macros/s/AKfycbwecDDPCzEjK5aEoZrKAD0g-ZvTubCrsaNjjhA-MXA1DcCQq4ey7jQgx5lVaDQPN4IP/exec";
-const DEFAULT_APPS_SCRIPT_URL = import.meta.env.VITE_APPS_SCRIPT_URL || SHARED_APPS_SCRIPT_URL;
+const FIREBASE_WORKSPACE_ID = import.meta.env.VITE_FIREBASE_WORKSPACE_ID || "parts-tracker";
+const FIREBASE_ATTACHMENT_CHUNK_SIZE = 700_000;
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "",
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "",
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "",
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "",
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "",
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || ""
+};
+
+let firebaseApp: FirebaseApp | null = null;
+let firebaseDb: Firestore | null = null;
 
 const processStatuses: ProcessStatus[] = [
   "Not Started",
@@ -189,13 +200,6 @@ function normalizePart(part: LegacyPart): Part {
   };
 }
 
-type SheetResult = {
-  ok: boolean;
-  parts?: LegacyPart[];
-  folders?: LegacyFolder[];
-  error?: string;
-};
-
 function stripLocalAttachmentData(parts: Part[]) {
   return parts.map((part) => ({ ...part, attachmentDataUrl: "" }));
 }
@@ -209,12 +213,6 @@ type WorkspaceCache = {
 };
 
 type LegacyFolder = string | Partial<FolderRecord>;
-
-function buildScriptUrl(webAppUrl: string, params: Record<string, string>) {
-  const url = new URL(webAppUrl);
-  Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
-  return url.toString();
-}
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
@@ -405,123 +403,144 @@ function saveWorkspaceCache(parts: Part[], folders: FolderRecord[], dirty: boole
   localStorage.setItem(WORKSPACE_CACHE_KEY, JSON.stringify(cache));
 }
 
-function readWorkspaceFromSheet(webAppUrl: string): Promise<{ parts: Part[]; folders: FolderRecord[] }> {
-  return new Promise((resolve, reject) => {
-    const callbackName = `partsTracker_${crypto.randomUUID().replace(/-/g, "")}`;
-    const script = document.createElement("script");
-    const timeoutId = window.setTimeout(() => {
-      cleanup();
-      reject(new Error("Timed out while loading the Google Sheet."));
-    }, 15000);
-
-    function cleanup() {
-      window.clearTimeout(timeoutId);
-      delete (window as unknown as Record<string, unknown>)[callbackName];
-      script.remove();
-    }
-
-    (window as unknown as Record<string, (result: SheetResult) => void>)[callbackName] = (result) => {
-      cleanup();
-      if (!result.ok) {
-        reject(new Error(result.error || "Google Sheet returned an error."));
-        return;
-      }
-      const rawParts = result.parts || [];
-      const { folders, idByPath, folderIds } = normalizeFolders(result.folders || [], rawParts);
-      resolve({
-        parts: rawParts.map(normalizePart).map((part) => migratePartFolder(part, idByPath, folderIds)),
-        folders
-      });
-    };
-
-    script.src = buildScriptUrl(webAppUrl, { action: "list", callback: callbackName });
-    script.onerror = () => {
-      cleanup();
-      reject(new Error("Could not reach the Google Apps Script web app."));
-    };
-    document.body.appendChild(script);
-  });
+function hasFirebaseConfig() {
+  return Boolean(firebaseConfig.apiKey && firebaseConfig.projectId && firebaseConfig.appId);
 }
 
-async function writeWorkspaceToSheet(webAppUrl: string, parts: Part[], folders: FolderRecord[]) {
-  const session = crypto.randomUUID();
-  const payload = encodeBase64Utf8(JSON.stringify({ parts, folders }));
-  const chunkSize = SYNC_CHUNK_SIZE;
-  const chunks = Array.from({ length: Math.ceil(payload.length / chunkSize) }, (_, index) =>
-    payload.slice(index * chunkSize, (index + 1) * chunkSize)
+function getFirebaseDatabase() {
+  if (!hasFirebaseConfig()) {
+    throw new Error("Firebase is not configured. Add the VITE_FIREBASE_* values to your environment.");
+  }
+  if (!firebaseApp) firebaseApp = initializeApp(firebaseConfig);
+  if (!firebaseDb) firebaseDb = getFirestore(firebaseApp);
+  return firebaseDb;
+}
+
+function workspaceCollection(db: Firestore, name: "parts" | "folders" | "attachmentChunks") {
+  return collection(db, "workspaces", FIREBASE_WORKSPACE_ID, name);
+}
+
+function partDocumentForFirestore(part: Part) {
+  const { attachmentDataUrl: _attachmentDataUrl, ...documentPart } = part;
+  return documentPart;
+}
+
+function rebuildAttachments(chunks: Array<{ partId: string; fileName: string; mimeType: string; chunkIndex: number; data: string }>) {
+  const grouped = new Map<string, Array<{ fileName: string; mimeType: string; chunkIndex: number; data: string }>>();
+  chunks.forEach((chunk) => {
+    grouped.set(chunk.partId, [...(grouped.get(chunk.partId) || []), chunk]);
+  });
+
+  const attachments = new Map<string, { fileName: string; mimeType: string; dataUrl: string }>();
+  grouped.forEach((partChunks, partId) => {
+    const sortedChunks = [...partChunks].sort((a, b) => a.chunkIndex - b.chunkIndex);
+    attachments.set(partId, {
+      fileName: sortedChunks[0]?.fileName || "",
+      mimeType: sortedChunks[0]?.mimeType || "application/pdf",
+      dataUrl: sortedChunks.map((chunk) => chunk.data).join("")
+    });
+  });
+  return attachments;
+}
+
+async function readWorkspaceFromFirebase(): Promise<{ parts: Part[]; folders: FolderRecord[] }> {
+  const db = getFirebaseDatabase();
+  const [partsSnapshot, foldersSnapshot, attachmentSnapshot] = await Promise.all([
+    getDocs(workspaceCollection(db, "parts")),
+    getDocs(workspaceCollection(db, "folders")),
+    getDocs(workspaceCollection(db, "attachmentChunks"))
+  ]);
+
+  const rawParts = partsSnapshot.docs.map((partDoc) => ({ id: partDoc.id, ...partDoc.data() }) as LegacyPart);
+  const rawFolders = foldersSnapshot.docs.map((folderDoc) => ({ id: folderDoc.id, ...folderDoc.data() }) as LegacyFolder);
+  const attachments = rebuildAttachments(
+    attachmentSnapshot.docs.map((attachmentDoc) => attachmentDoc.data() as {
+      partId: string;
+      fileName: string;
+      mimeType: string;
+      chunkIndex: number;
+      data: string;
+    })
   );
 
-  const beginResult = await callScriptJsonp(webAppUrl, {
-    action: "beginSync",
-    session,
-    total: String(chunks.length)
+  const { folders, idByPath, folderIds } = normalizeFolders(rawFolders, rawParts);
+  const parts = rawParts.map(normalizePart).map((part) => {
+    const attachment = attachments.get(part.id);
+    const normalizedPart = migratePartFolder(part, idByPath, folderIds);
+    if (!attachment) return normalizedPart;
+    return {
+      ...normalizedPart,
+      attachmentFileName: attachment.fileName,
+      attachmentMimeType: attachment.mimeType,
+      attachmentDataUrl: attachment.dataUrl
+    };
   });
-  if (!beginResult.ok) {
-    if (beginResult.error === "Unsupported action.") {
-      const legacyResult = await callScriptJsonp(webAppUrl, {
-        action: "replaceAll",
-        payload: JSON.stringify({ parts, folders })
-      });
-      if (!legacyResult.ok) throw new Error(legacyResult.error || "Google Sheet returned an error.");
-      return;
-    }
-    throw new Error(beginResult.error || "Google Sheet returned an error.");
-  }
 
-  for (const [index, chunk] of chunks.entries()) {
-    const appendResult = await callScriptJsonp(webAppUrl, {
-      action: "appendSync",
-      session,
-      index: String(index),
-      chunk
-    });
-    if (!appendResult.ok) throw new Error(appendResult.error || "Google Sheet returned an error.");
-  }
-
-  const commitResult = await callScriptJsonp(webAppUrl, {
-    action: "commitSync",
-    session,
-    total: String(chunks.length)
-  });
-  if (!commitResult.ok) throw new Error(commitResult.error || "Google Sheet returned an error.");
+  return { parts, folders };
 }
 
-function encodeBase64Utf8(value: string) {
-  const bytes = new TextEncoder().encode(value);
-  let binary = "";
-  bytes.forEach((byte) => {
-    binary += String.fromCharCode(byte);
-  });
-  return btoa(binary);
-}
+async function writeWorkspaceToFirebase(parts: Part[], folders: FolderRecord[]) {
+  const db = getFirebaseDatabase();
+  const existingSnapshots = await Promise.all([
+    getDocs(workspaceCollection(db, "parts")),
+    getDocs(workspaceCollection(db, "folders")),
+    getDocs(workspaceCollection(db, "attachmentChunks"))
+  ]);
 
-function callScriptJsonp(webAppUrl: string, params: Record<string, string>): Promise<SheetResult> {
-  return new Promise((resolve, reject) => {
-    const callbackName = `partsTracker_${crypto.randomUUID().replace(/-/g, "")}`;
-    const script = document.createElement("script");
-    const timeoutId = window.setTimeout(() => {
-      cleanup();
-      reject(new Error("Timed out while contacting the Google Sheet."));
-    }, 20000);
+  let batch = writeBatch(db);
+  let operationCount = 0;
 
-    function cleanup() {
-      window.clearTimeout(timeoutId);
-      delete (window as unknown as Record<string, unknown>)[callbackName];
-      script.remove();
+  async function queueOperation(addToBatch: (targetBatch: WriteBatch) => void) {
+    addToBatch(batch);
+    operationCount += 1;
+    if (operationCount >= 450) {
+      await batch.commit();
+      batch = writeBatch(db);
+      operationCount = 0;
     }
+  }
 
-    (window as unknown as Record<string, (result: SheetResult) => void>)[callbackName] = (result) => {
-      cleanup();
-      resolve(result);
-    };
+  for (const snapshot of existingSnapshots) {
+    for (const existingDoc of snapshot.docs) {
+      await queueOperation((targetBatch) => targetBatch.delete(existingDoc.ref));
+    }
+  }
 
-    script.src = buildScriptUrl(webAppUrl, { ...params, callback: callbackName });
-    script.onerror = () => {
-      cleanup();
-      reject(new Error("Could not reach the Google Apps Script web app."));
-    };
-    document.body.appendChild(script);
-  });
+  for (const part of parts) {
+    await queueOperation((targetBatch) =>
+      targetBatch.set(doc(workspaceCollection(db, "parts"), part.id), partDocumentForFirestore(part))
+    );
+
+    const dataUrl = part.attachmentDataUrl.trim();
+    if (dataUrl) {
+      for (let index = 0; index < dataUrl.length; index += FIREBASE_ATTACHMENT_CHUNK_SIZE) {
+        const chunkIndex = Math.floor(index / FIREBASE_ATTACHMENT_CHUNK_SIZE);
+        await queueOperation((targetBatch) =>
+          targetBatch.set(doc(workspaceCollection(db, "attachmentChunks"), `${part.id}_${String(chunkIndex).padStart(4, "0")}`), {
+            partId: part.id,
+            fileName: part.attachmentFileName,
+            mimeType: part.attachmentMimeType || "application/pdf",
+            chunkIndex,
+            data: dataUrl.slice(index, index + FIREBASE_ATTACHMENT_CHUNK_SIZE)
+          })
+        );
+      }
+    }
+  }
+
+  for (const folder of folders) {
+    await queueOperation((targetBatch) => targetBatch.set(doc(workspaceCollection(db, "folders"), folder.id), folder));
+  }
+
+  await queueOperation((targetBatch) =>
+    targetBatch.set(doc(db, "workspaces", FIREBASE_WORKSPACE_ID), {
+      updatedAt: serverTimestamp(),
+      partCount: parts.length,
+      folderCount: folders.length
+    })
+  );
+
+  if (operationCount > 0) await batch.commit();
 }
 
 function saveFile(filename: string, content: string, type: string) {
@@ -648,7 +667,7 @@ function reconcileWorkspaceForSync(
 
   localParts.forEach((part) => {
     const remotePart = remoteById.get(part.id);
-    const isNewToSheet = !remotePart;
+    const isNewToBackend = !remotePart;
     const needsProductionNumber = part.itemKind === "production";
     const hasCollision = Boolean(needsProductionNumber && part.partNumber && usedPartNumbers.has(part.partNumber));
     let nextPart = !part.attachmentDataUrl && remotePart?.attachmentDataUrl
@@ -665,7 +684,7 @@ function reconcileWorkspaceForSync(
       nextPart = {
         ...nextPart,
         partNumber: nextNumber,
-        originalPartNumber: isNewToSheet || !nextPart.originalPartNumber ? nextNumber : nextPart.originalPartNumber
+        originalPartNumber: isNewToBackend || !nextPart.originalPartNumber ? nextNumber : nextPart.originalPartNumber
       };
       renumberedCount += 1;
     }
@@ -812,19 +831,19 @@ export function App() {
   const [folderRecords, setFolderRecords] = useState<FolderRecord[]>(cachedWorkspace.folders);
   const [form, setForm] = useState<PartForm>(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const sheetWebAppUrl = DEFAULT_APPS_SCRIPT_URL;
-  const [isSheetLoading, setIsSheetLoading] = useState(false);
+  const firebaseReady = hasFirebaseConfig();
+  const [isBackendLoading, setIsBackendLoading] = useState(false);
   const [hasPendingSync, setHasPendingSync] = useState(cachedWorkspace.dirty);
   const [syncRetryBlocked, setSyncRetryBlocked] = useState(false);
   const [deletedPartIds, setDeletedPartIds] = useState<string[]>(cachedWorkspace.deletedPartIds);
-  const [sheetMessage, setSheetMessage] = useState(
+  const [backendMessage, setBackendMessage] = useState(
     cachedWorkspace.parts.length
       ? cachedWorkspace.dirty
         ? "Loaded local changes. Sync is pending."
         : "Loaded local cache."
-      : sheetWebAppUrl
-        ? "Google Sheet connection ready."
-        : "Google Sheet sync URL is not configured."
+      : firebaseReady
+        ? "Firebase connection ready."
+        : "Firebase is not configured."
   );
   const [query, setQuery] = useState("");
   const [activeSection, setActiveSection] = useState<ItemKind>("bom");
@@ -846,32 +865,32 @@ export function App() {
   const [panelWidths, setPanelWidths] = useState({ editor: 380 });
 
   useEffect(() => {
-    if (sheetWebAppUrl) {
-      if (!hasPendingSync) void refreshFromSheet(sheetWebAppUrl);
+    if (firebaseReady) {
+      if (!hasPendingSync) void refreshFromBackend();
     }
-  }, [sheetWebAppUrl]);
+  }, [firebaseReady]);
 
   useEffect(() => {
-    if (!sheetWebAppUrl || !hasPendingSync || isSheetLoading || syncRetryBlocked) return;
+    if (!firebaseReady || !hasPendingSync || isBackendLoading || syncRetryBlocked) return;
 
     const timer = window.setTimeout(() => {
-      void syncToSheet();
+      void syncToBackend();
     }, SYNC_INTERVAL_MS);
 
     return () => window.clearTimeout(timer);
-  }, [deletedPartIds, folderRecords, hasPendingSync, isSheetLoading, parts, sheetWebAppUrl, syncRetryBlocked]);
+  }, [deletedPartIds, firebaseReady, folderRecords, hasPendingSync, isBackendLoading, parts, syncRetryBlocked]);
 
-  async function refreshFromSheet(url = sheetWebAppUrl) {
-    if (!url) {
-      setSheetMessage("Google Sheet sync URL is not configured.");
+  async function refreshFromBackend() {
+    if (!firebaseReady) {
+      setBackendMessage("Firebase is not configured.");
       setParts([]);
       return;
     }
 
-    setIsSheetLoading(true);
-    setSheetMessage("Loading from Google Sheet...");
+    setIsBackendLoading(true);
+    setBackendMessage("Loading from Firebase...");
     try {
-      const workspace = await readWorkspaceFromSheet(url);
+      const workspace = await readWorkspaceFromFirebase();
       const nextParts = workspace.parts;
       const nextFolders = workspace.folders;
       setParts(nextParts);
@@ -882,11 +901,11 @@ export function App() {
       setSyncRetryBlocked(false);
       setSelected(new Set());
       setPreviewPartId((current) => (nextParts.some((part) => part.id === current) ? current : null));
-      setSheetMessage(`Loaded ${nextParts.length} parts from the Google Sheet.`);
+      setBackendMessage(`Loaded ${nextParts.length} parts from Firebase.`);
     } catch (error) {
-      setSheetMessage(error instanceof Error ? error.message : "Could not load from Google Sheet.");
+      setBackendMessage(error instanceof Error ? error.message : "Could not load from Firebase.");
     } finally {
-      setIsSheetLoading(false);
+      setIsBackendLoading(false);
     }
   }
 
@@ -897,20 +916,20 @@ export function App() {
     setHasPendingSync(true);
     setSyncRetryBlocked(false);
     saveWorkspaceCache(nextParts, nextFolders, true, nextDeletedPartIds);
-    setSheetMessage(sheetWebAppUrl ? "Saved locally. Google Sheet sync pending." : "Saved locally. Sheet sync is not configured.");
+    setBackendMessage(firebaseReady ? "Saved locally. Firebase sync pending." : "Saved locally. Firebase is not configured.");
     return true;
   }
 
-  async function syncToSheet() {
-    if (!sheetWebAppUrl) {
-      setSheetMessage("Google Sheet sync URL is not configured.");
+  async function syncToBackend() {
+    if (!firebaseReady) {
+      setBackendMessage("Firebase is not configured.");
       return false;
     }
 
-    setIsSheetLoading(true);
-    setSheetMessage("Checking latest Sheet data before syncing...");
+    setIsBackendLoading(true);
+    setBackendMessage("Checking latest Firebase data before syncing...");
     try {
-      const remoteWorkspace = await readWorkspaceFromSheet(sheetWebAppUrl);
+      const remoteWorkspace = await readWorkspaceFromFirebase();
       const reconciled = reconcileWorkspaceForSync(
         parts,
         remoteWorkspace.parts,
@@ -919,26 +938,26 @@ export function App() {
         deletedPartIds
       );
 
-      setSheetMessage("Syncing local changes to Google Sheet...");
-      await writeWorkspaceToSheet(sheetWebAppUrl, reconciled.parts, reconciled.folders);
+      setBackendMessage("Syncing local changes to Firebase...");
+      await writeWorkspaceToFirebase(reconciled.parts, reconciled.folders);
       setParts(reconciled.parts);
       setFolderRecords(reconciled.folders);
       setDeletedPartIds([]);
       saveWorkspaceCache(reconciled.parts, reconciled.folders, false);
       setHasPendingSync(false);
       setSyncRetryBlocked(false);
-      setSheetMessage(
+      setBackendMessage(
         reconciled.renumberedCount
           ? `Synced ${reconciled.parts.length} parts. Renumbered ${reconciled.renumberedCount} conflicting part(s).`
-          : `Synced ${reconciled.parts.length} parts to the Google Sheet.`
+          : `Synced ${reconciled.parts.length} parts to Firebase.`
       );
       return true;
     } catch (error) {
       setSyncRetryBlocked(true);
-      setSheetMessage(error instanceof Error ? error.message : "Could not save to Google Sheet.");
+      setBackendMessage(error instanceof Error ? error.message : "Could not save to Firebase.");
       return false;
     } finally {
-      setIsSheetLoading(false);
+      setIsBackendLoading(false);
     }
   }
 
@@ -1340,7 +1359,7 @@ export function App() {
         }
       }
     } catch {
-      setSheetMessage("Could not read dragged item.");
+      setBackendMessage("Could not read dragged item.");
     } finally {
       clearDragState();
     }
@@ -1362,7 +1381,7 @@ export function App() {
         movePartsToPosition(partIds, targetPartId, partDropIndicator?.position ?? getPartDropPosition(event));
       }
     } catch {
-      setSheetMessage("Could not read dragged part.");
+      setBackendMessage("Could not read dragged part.");
     } finally {
       clearDragState();
     }
@@ -1781,38 +1800,38 @@ export function App() {
       )}
       <section className="hero">
         <div>
-          <p className="eyebrow">Google Sheet workspace</p>
+          <p className="eyebrow">Firebase workspace</p>
           <h1>Parts Library</h1>
         </div>
         <div className="hero-actions">
           <div className="sync-summary">
-            <strong>{hasPendingSync ? "Unsynced" : isSheetLoading ? "Syncing" : "Synced"}</strong>
-            <span>{sheetMessage}</span>
+            <strong>{hasPendingSync ? "Unsynced" : isBackendLoading ? "Syncing" : "Synced"}</strong>
+            <span>{backendMessage}</span>
           </div>
           <button
             className="button secondary"
-            disabled={isSheetLoading || !sheetWebAppUrl}
+            disabled={isBackendLoading || !firebaseReady}
             type="button"
-            onClick={() => void refreshFromSheet()}
-            title="Reload from Google Sheet"
+            onClick={() => void refreshFromBackend()}
+            title="Reload from Firebase"
           >
             <RefreshCw size={16} />
             Refresh
           </button>
           <button
             className="button secondary"
-            disabled={isSheetLoading || !sheetWebAppUrl || !hasPendingSync}
+            disabled={isBackendLoading || !firebaseReady || !hasPendingSync}
             type="button"
             onClick={() => {
               setSyncRetryBlocked(false);
-              void syncToSheet();
+              void syncToBackend();
             }}
-            title="Push local changes to Google Sheet"
+            title="Push local changes to Firebase"
           >
             <RefreshCw size={16} />
             Sync Now
           </button>
-          <label className="button secondary" title="Import CSV into the Google Sheet">
+          <label className="button secondary" title="Import CSV into Firebase-backed workspace">
             <Upload size={16} />
             Import CSV
             <input type="file" accept=".csv,text/csv" onChange={importCsv} />
@@ -1830,7 +1849,7 @@ export function App() {
             <FileJson size={16} />
             JSON
           </button>
-          <button className="button primary" type="button" onClick={downloadCsv} title="Export for Google Sheets">
+          <button className="button primary" type="button" onClick={downloadCsv} title="Export CSV backup">
             <ArrowDownToLine size={16} />
             Download CSV
           </button>
@@ -2082,7 +2101,7 @@ export function App() {
             <textarea value={form.notes} onChange={(event) => updateForm("notes", event.target.value)} />
           </label>
 
-          <button className="button primary wide" disabled={isSheetLoading || !sheetWebAppUrl} type="submit">
+          <button className="button primary wide" disabled={isBackendLoading} type="submit">
             {editingId ? <Database size={16} /> : <PackagePlus size={16} />}
             {editingId ? "Save Item" : activeSection === "bom" ? "Add BOM Item" : "Add Production Item"}
           </button>

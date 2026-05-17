@@ -1,87 +1,115 @@
 # Parts Tracker
 
-A local TypeScript/React interface for a Google Sheet-backed parts library. The app does not store the parts database locally; it loads and saves parts through a Google Apps Script web app connected to your Sheet.
+A TypeScript/React parts library backed by Firebase Firestore. The app applies edits immediately in the browser, keeps a local cache as a fallback, and syncs to Firebase about every 30 seconds. Use **Sync Now** before closing if the status shows unsynced changes.
 
-For speed, edits are applied immediately in the browser and cached locally, then synced to Google Sheets about every 30 seconds. Use **Sync Now** before closing the app if the status shows unsynced local changes.
-
-Before each sync, the app pulls the latest Sheet data and merges in parts other people added. If two users created the same generated part number, the app renumbers the local conflicting part before writing. The Apps Script also enforces unique part numbers while writing to the Sheet.
+The old Google Sheet / Apps Script backend has been replaced. `google-apps-script.gs` can be kept as a migration reference, but the app no longer calls it.
 
 ## Run Locally
 
 1. Install Node.js LTS from https://nodejs.org/
-2. Open PowerShell in this folder.
-3. Run:
+2. Copy `.env.example` to `.env.local`.
+3. Fill in the Firebase values from your Firebase project settings.
+4. Open PowerShell in this folder and run:
 
 ```powershell
 npm.cmd install
 npm.cmd run dev
 ```
 
-4. Open the local URL Vite prints, usually `http://127.0.0.1:5173/`.
+5. Open the local URL Vite prints, usually `http://127.0.0.1:5173/`.
 
-On Windows you can also double-click `Start-PartsTracker.cmd` or run:
-
-```cmd
-Start-PartsTracker.cmd
-```
+On Windows you can also double-click `Start-PartsTracker.cmd`.
 
 If PowerShell shows `npm.ps1 cannot be loaded because running scripts is disabled`, use `npm.cmd` as shown above.
 
-## GitHub Pages
+## Firebase Setup
 
-This project can be hosted as a static GitHub Pages site.
+1. Go to https://console.firebase.google.com/ and create a project on the Spark plan.
+2. Add a Web App in **Project settings > General > Your apps**.
+3. Copy the web config values into `.env.local`:
 
-1. Create a GitHub repo for this folder.
-2. Push the project to the repo's `main` branch.
-3. In GitHub, open **Settings > Pages**.
-4. Set **Source** to **GitHub Actions**.
-5. Push to `main` again, or run the **Deploy GitHub Pages** workflow manually.
-
-The workflow builds the app with `VITE_BASE_PATH` set to `/<repo-name>/`, which is the path GitHub Pages uses for project sites.
-
-The app has the shared Apps Script URL baked into the code so every deployed user connects to the same Sheet backend. To override it without editing code, add this GitHub repository variable:
-
-- `VITE_APPS_SCRIPT_URL`
-
-The Sheet URL is not exposed in the application UI.
-
-## Google Sheet Setup
-
-1. Open the linked Google Sheet.
-2. Go to **Extensions > Apps Script**.
-3. Paste the contents of `google-apps-script.gs` into the Apps Script editor.
-4. Click **Deploy > New deployment**.
-5. Choose **Web app**.
-6. Set **Execute as** to `Me`.
-7. Set **Who has access** to **Anyone**. This is needed because the local app writes to the web app without Google OAuth.
-8. Deploy and copy the `/exec` web app URL.
-9. Add that `/exec` URL to `SHARED_APPS_SCRIPT_URL` in `src/App.tsx`, or use the GitHub repository variable `VITE_APPS_SCRIPT_URL` to override it during Pages builds.
-10. Reload the app. It will use the configured Apps Script URL without showing Sheet URL inputs or links.
-
-The script creates/uses a `Parts` tab for part rows and a `Folders` tab for folder-only organization paths.
-
-Anyone with the deployed Apps Script URL can write to the Sheet, so keep that URL private.
-
-If the app says it cannot reach the Apps Script web app, check that you pasted the deployed `/exec` URL, not the Sheet URL and not the `/dev` test URL. Also confirm the deployment access is set to **Anyone**.
-
-If Google shows **This app is blocked** during authorization, make sure the first lines of the Apps Script file are:
-
-```js
-/**
- * @OnlyCurrentDoc
- */
+```env
+VITE_FIREBASE_API_KEY=...
+VITE_FIREBASE_AUTH_DOMAIN=...
+VITE_FIREBASE_PROJECT_ID=...
+VITE_FIREBASE_STORAGE_BUCKET=...
+VITE_FIREBASE_MESSAGING_SENDER_ID=...
+VITE_FIREBASE_APP_ID=...
+VITE_FIREBASE_WORKSPACE_ID=parts-tracker
 ```
 
-Then save the script and deploy a new web app version. The script must be opened from **Extensions > Apps Script** inside the target Sheet.
+4. In Firebase, create a **Cloud Firestore** database.
+5. Start in production mode, then add rules appropriate for your team.
 
-## Google Sheets
+For a private-ish team tool without login, you can temporarily use broad rules while testing:
 
-The app stores rows in the Sheet using these columns: `id`, `name`, `partNumber`, `originalPartNumber`, `folder`, `quantity`, `unitPrice`, `material`, `thickness`, `processes`, `drawingUrl`, `vendor`, `location`, and `notes`.
+```txt
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /workspaces/{workspaceId}/{document=**} {
+      allow read, write: if true;
+    }
+  }
+}
+```
 
-Process routes are stored as values like `Router:Done; Deburr:In Progress`.
+Those rules mean anyone who can load the site and knows the Firebase config can read/write the data. For a real team deployment, add Firebase Auth and restrict writes to signed-in users.
 
-Nested folders are stored as slash-separated paths, such as `Subsystem / Intake / Plates`. Folder-only paths live in the `Folders` tab. Parts without a folder live in the root of the library. Deleting a folder moves affected parts to the deleted folder's parent.
+## Firestore Data
 
-The library behaves like a file manager: use breadcrumbs to move through folders, create folders from the browser toolbar, open subfolders from folder tiles, drag parts from the table onto folders to move them, and drag folders onto other folders to nest/reorganize them. Folders can be renamed, unpacked into their parent, or deleted.
+The app stores data under:
 
-Folder order is user-controlled and stored in the `Folders` tab. Use the up/down controls in the folder tree to reorder sibling folders.
+```txt
+workspaces/{VITE_FIREBASE_WORKSPACE_ID}
+workspaces/{workspaceId}/parts
+workspaces/{workspaceId}/folders
+workspaces/{workspaceId}/attachmentChunks
+```
+
+PDF BOM attachments are split into chunk documents in `attachmentChunks` and reassembled by the app for preview. This avoids the Firestore single-document size limit while staying within the free-tier style of setup.
+
+## GitHub Pages
+
+This project can still be hosted as a static GitHub Pages site.
+
+1. Push the project to GitHub.
+2. In GitHub, open **Settings > Secrets and variables > Actions > Variables**.
+3. Add the same `VITE_FIREBASE_*` values from `.env.local`.
+4. Open **Settings > Pages**.
+5. Set **Source** to **GitHub Actions**.
+6. Push to `main`, or run the **Deploy GitHub Pages** workflow manually.
+
+Firebase web config is safe to ship in a frontend app; Firestore security rules are what protect the database.
+
+## Firebase Hosting
+
+Firebase Hosting also works on the free Spark plan.
+
+1. Install the Firebase CLI:
+
+```powershell
+npm.cmd install -g firebase-tools
+```
+
+2. Log in and select your Firebase project:
+
+```powershell
+firebase login
+firebase use --add
+```
+
+3. Build and deploy:
+
+```powershell
+npm.cmd run build
+firebase deploy --only hosting
+```
+
+The included `firebase.json` serves the built `dist` folder and routes app URLs back to `index.html`.
+
+## Notes
+
+Before each sync, the app reads the latest Firebase workspace and merges in parts other people added. If two users created the same generated production part number, the app renumbers the local conflicting part before writing.
+
+Folders behave like a file manager: create folders from the list toolbar, expand/collapse folders inline, drag parts into folders, nest folders, rename/unpack/delete folders from the right-click menu, and reorder by dragging.
