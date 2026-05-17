@@ -14,6 +14,7 @@ const HEADERS = [
   'folder',
   'quantity',
   'unitPrice',
+  'discountPercent',
   'material',
   'thickness',
   'processes',

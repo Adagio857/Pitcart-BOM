@@ -33,6 +33,7 @@ type Part = {
   folder: string;
   quantity: number;
   unitPrice: number;
+  discountPercent: number;
   material: string;
   thickness: string;
   processes: ProcessStep[];
@@ -61,9 +62,10 @@ type LegacyPart = Omit<Partial<Part>, "processes"> & {
   status?: ProcessStatus;
 };
 
-type PartForm = Omit<Part, "id" | "quantity" | "unitPrice"> & {
+type PartForm = Omit<Part, "id" | "quantity" | "unitPrice" | "discountPercent"> & {
   quantity: string;
   unitPrice: string;
+  discountPercent: string;
 };
 
 type FolderDropPosition = "before" | "after" | "inside";
@@ -111,6 +113,7 @@ const emptyForm: PartForm = {
   folder: "",
   quantity: "1",
   unitPrice: "0",
+  discountPercent: "0",
   material: "",
   thickness: "",
   processes: [],
@@ -133,6 +136,7 @@ const csvHeaders = [
   "folder",
   "quantity",
   "unitPrice",
+  "discountPercent",
   "material",
   "thickness",
   "processes",
@@ -166,6 +170,7 @@ function normalizePart(part: LegacyPart): Part {
     folder: part.folder === "Unfiled" ? "" : String(part.folder || "").trim(),
     quantity: Number(part.quantity) || 0,
     unitPrice: Number(part.unitPrice) || 0,
+    discountPercent: clampNumber(Number(part.discountPercent) || 0, 0, 100),
     material: legacyMaterial || "",
     thickness: part.thickness || "",
     processes: processes.map((process) => ({
@@ -265,6 +270,17 @@ function readFileAsDataUrl(file: File) {
     reader.onerror = () => reject(new Error("Could not read the selected file."));
     reader.readAsDataURL(file);
   });
+}
+
+function dataUrlToBlob(value: string) {
+  const [metadata, data = ""] = value.split(",");
+  const mimeType = metadata.match(/^data:([^;]+)/)?.[1] || "application/octet-stream";
+  const binary = atob(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new Blob([bytes], { type: mimeType });
 }
 
 function parseItemKind(value: unknown): ItemKind {
@@ -759,11 +775,17 @@ function getFolderDisplayPath(folderId: string, folders: FolderRecord[]) {
   return pieces.join(" / ");
 }
 
+function getBomLineCost(part: Part) {
+  const discountMultiplier = 1 - clampNumber(part.discountPercent || 0, 0, 100) / 100;
+  return part.quantity * part.unitPrice * discountMultiplier;
+}
+
 function partToForm(part: Part): PartForm {
   return {
     ...part,
     quantity: String(part.quantity),
-    unitPrice: String(part.unitPrice)
+    unitPrice: String(part.unitPrice),
+    discountPercent: String(part.discountPercent)
   };
 }
 
@@ -776,6 +798,7 @@ function formToPart(form: PartForm, id: string = crypto.randomUUID()): Part {
     folder: form.folder,
     quantity: Number(form.quantity) || 0,
     unitPrice: Number(form.unitPrice) || 0,
+    discountPercent: clampNumber(Number(form.discountPercent) || 0, 0, 100),
     processes: form.processes
       .filter((process) => process.name.trim())
       .map((process) => ({ name: process.name.trim(), status: process.status }))
@@ -816,6 +839,7 @@ export function App() {
   const [partDropIndicator, setPartDropIndicator] = useState<PartDropIndicator | null>(null);
   const [folderContextMenu, setFolderContextMenu] = useState<FolderContextMenu | null>(null);
   const [previewPartId, setPreviewPartId] = useState<string | null>(null);
+  const [previewBlobUrl, setPreviewBlobUrl] = useState("");
   const [drawingFrameFailed, setDrawingFrameFailed] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [lastSelectedPartId, setLastSelectedPartId] = useState<string | null>(null);
@@ -1010,7 +1034,7 @@ export function App() {
     [listEntries]
   );
 
-  const totalValue = bomItems.reduce((sum, part) => sum + part.quantity * part.unitPrice, 0);
+  const totalValue = bomItems.reduce((sum, part) => sum + getBomLineCost(part), 0);
   const lowStockCount = bomItems.filter((part) => part.quantity <= 2).length;
   const blockedCount = productionItems.filter((part) => part.processes.some((process) => process.status === "Blocked")).length;
   const previewPart = parts.find((part) => part.id === previewPartId) ?? null;
@@ -1019,11 +1043,27 @@ export function App() {
       ? previewPart.drawingUrl.trim()
       : previewPart?.attachmentDataUrl || normalizeExternalUrl(previewPart?.material || "") || normalizeExternalUrl(previewPart?.location || "");
   const previewIsPdf = Boolean(previewSourceUrl?.startsWith("data:application/pdf") || previewPart?.attachmentMimeType === "application/pdf");
+  const previewFrameUrl = previewIsPdf && previewBlobUrl ? previewBlobUrl : previewSourceUrl;
   const isOnshapeDrawingUrl = /(^|\.)onshape\.com$/i.test(safeHostname(previewSourceUrl || ""));
   const nextPartNumber = useMemo(() => generateNextPartNumber(parts), [parts]);
   const visiblePartNumber = form.partNumber || (!editingId ? nextPartNumber : "");
   const originalPartNumber = form.originalPartNumber || (!editingId ? nextPartNumber : form.partNumber);
   const canRevertPartNumber = Boolean(originalPartNumber && visiblePartNumber !== originalPartNumber);
+
+  useEffect(() => {
+    setDrawingFrameFailed(false);
+    if (!previewSourceUrl?.startsWith("data:application/pdf")) {
+      setPreviewBlobUrl("");
+      return;
+    }
+
+    const blobUrl = URL.createObjectURL(dataUrlToBlob(previewSourceUrl));
+    setPreviewBlobUrl(blobUrl);
+
+    return () => {
+      URL.revokeObjectURL(blobUrl);
+    };
+  }, [previewSourceUrl]);
 
   function updateForm(field: keyof PartForm, value: string) {
     setForm((current) => ({ ...current, [field]: value }));
@@ -1410,6 +1450,7 @@ export function App() {
         linkedBomId: nextItemKind === "production" ? form.linkedBomId : "",
         partNumber: nextItemKind === "production" ? visiblePartNumber : "",
         originalPartNumber: nextItemKind === "production" ? form.originalPartNumber || generatedPartNumber : "",
+        discountPercent: nextItemKind === "bom" ? form.discountPercent : "0",
         folder: editingId ? form.folder : ""
       },
       editingId ?? undefined
@@ -1500,6 +1541,7 @@ export function App() {
       folder: "",
       quantity: "1",
       unitPrice: "0",
+      discountPercent: "0",
       material: sourceType === "cart" ? href : "Checkout PDF",
       thickness: label || (sourceType === "cart" ? "Cart link" : "Uploaded PDF"),
       vendor: host,
@@ -1581,6 +1623,7 @@ export function App() {
           folder: record.folder === "Unfiled" ? "" : folderId,
           quantity: record.quantity ?? "0",
           unitPrice: record.unitPrice ?? "0",
+          discountPercent: record.discountPercent ?? "0",
           material,
           thickness: record.thickness ?? "",
           processes: parseProcesses(record.processes || record.process || "", record.status),
@@ -1921,6 +1964,17 @@ export function App() {
                     type="number"
                     value={form.unitPrice}
                     onChange={(event) => updateForm("unitPrice", event.target.value)}
+                  />
+                </label>
+                <label>
+                  Discount %
+                  <input
+                    max="100"
+                    min="0"
+                    step="0.01"
+                    type="number"
+                    value={form.discountPercent}
+                    onChange={(event) => updateForm("discountPercent", event.target.value)}
                   />
                 </label>
                 <label>
@@ -2332,7 +2386,9 @@ export function App() {
                     ) : (
                       <>
                         <td>{part.quantity}</td>
-                        <td>${part.unitPrice.toFixed(2)}</td>
+                        <td title={part.discountPercent ? `${part.discountPercent}% discount applied` : "No discount"}>
+                          ${getBomLineCost(part).toFixed(2)}
+                        </td>
                       </>
                     )}
                     <td>
@@ -2358,11 +2414,11 @@ export function App() {
                   <h2>{previewPart.name}</h2>
                 </div>
                 <div className="preview-actions">
-                  {previewSourceUrl && (
+                  {previewFrameUrl && (
                     <a
                       className="icon-button"
-                      href={previewSourceUrl}
-                      rel={previewSourceUrl.startsWith("data:") ? undefined : "noreferrer"}
+                      href={previewFrameUrl}
+                      rel={previewFrameUrl.startsWith("blob:") || previewFrameUrl.startsWith("data:") ? undefined : "noreferrer"}
                       target="_blank"
                       title="Open source"
                     >
@@ -2379,7 +2435,7 @@ export function App() {
                   </button>
                 </div>
               </div>
-              {previewSourceUrl ? (
+              {previewFrameUrl ? (
                 <div className="drawing-frame-wrap">
                   {isOnshapeDrawingUrl && (
                     <div className="drawing-notice">
@@ -2389,15 +2445,21 @@ export function App() {
                   {drawingFrameFailed ? (
                     <div className="empty-preview">
                       <span>Preview could not load in the app.</span>
-                      <a href={previewSourceUrl} rel={previewSourceUrl.startsWith("data:") ? undefined : "noreferrer"} target="_blank">Open source</a>
+                      <a
+                        href={previewFrameUrl}
+                        rel={previewFrameUrl.startsWith("blob:") || previewFrameUrl.startsWith("data:") ? undefined : "noreferrer"}
+                        target="_blank"
+                      >
+                        Open source
+                      </a>
                     </div>
                   ) : (
                     <iframe
                       allow="fullscreen"
                       allowFullScreen
-                      key={previewSourceUrl}
+                      key={previewFrameUrl}
                       loading="lazy"
-                      src={previewSourceUrl}
+                      src={previewFrameUrl}
                       title={`${previewPart.name} preview`}
                       referrerPolicy="no-referrer-when-downgrade"
                       onError={() => setDrawingFrameFailed(true)}
