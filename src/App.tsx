@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import { ChangeEvent, CSSProperties, DragEvent, FormEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { initializeApp, type FirebaseApp } from "firebase/app";
-import { collection, doc, getDocs, getFirestore, serverTimestamp, setDoc, writeBatch, type Firestore, type WriteBatch } from "firebase/firestore";
+import { collection, doc, getDocs, getFirestore, serverTimestamp, writeBatch, type Firestore, type WriteBatch } from "firebase/firestore";
 
 type ProcessStatus = "Not Started" | "Queued" | "In Progress" | "Done" | "Blocked" | "Outsourced";
 
@@ -101,7 +101,6 @@ type UndoSnapshot = {
 };
 
 const WORKSPACE_CACHE_KEY = "parts-tracker.workspaceCache.v1";
-const SYNC_INTERVAL_MS = 30000;
 const MAX_UNDO_STEPS = 30;
 const FIREBASE_WORKSPACE_ID = import.meta.env.VITE_FIREBASE_WORKSPACE_ID || "parts-tracker";
 const FIREBASE_ATTACHMENT_CHUNK_SIZE = 700_000;
@@ -855,6 +854,8 @@ function formToPart(form: PartForm, id: string = crypto.randomUUID()): Part {
 export function App() {
   const workspaceRef = useRef<HTMLElement | null>(null);
   const undoStackRef = useRef<UndoSnapshot[]>([]);
+  const backendSaveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const backendSaveVersionRef = useRef(0);
   const cachedWorkspace = useMemo(loadWorkspaceCache, []);
   const [parts, setParts] = useState<Part[]>(cachedWorkspace.parts);
   const [folderRecords, setFolderRecords] = useState<FolderRecord[]>(cachedWorkspace.folders);
@@ -862,14 +863,13 @@ export function App() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const firebaseReady = hasFirebaseConfig();
   const [isBackendLoading, setIsBackendLoading] = useState(false);
-  const [hasPendingSync, setHasPendingSync] = useState(cachedWorkspace.dirty);
-  const [syncRetryBlocked, setSyncRetryBlocked] = useState(false);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(cachedWorkspace.dirty);
   const [deletedPartIds, setDeletedPartIds] = useState<string[]>(cachedWorkspace.deletedPartIds);
   const [deletedFolderIds, setDeletedFolderIds] = useState<string[]>(cachedWorkspace.deletedFolderIds);
   const [backendMessage, setBackendMessage] = useState(
     cachedWorkspace.parts.length
       ? cachedWorkspace.dirty
-        ? "Loaded local changes. Sync is pending."
+        ? "Loaded local changes. Saving to Firebase..."
         : "Loaded local cache."
       : firebaseReady
         ? "Firebase connection ready."
@@ -896,20 +896,18 @@ export function App() {
   const [undoCount, setUndoCount] = useState(0);
 
   useEffect(() => {
-    if (firebaseReady) {
-      if (!hasPendingSync) void refreshFromBackend();
+    if (!firebaseReady) return;
+    if (cachedWorkspace.dirty) {
+      scheduleImmediateBackendSave({
+        parts,
+        folders: folderRecords,
+        deletedPartIds,
+        deletedFolderIds
+      });
+      return;
     }
+    void refreshFromBackend();
   }, [firebaseReady]);
-
-  useEffect(() => {
-    if (!firebaseReady || !hasPendingSync || isBackendLoading || syncRetryBlocked) return;
-
-    const timer = window.setTimeout(() => {
-      void syncToBackend();
-    }, SYNC_INTERVAL_MS);
-
-    return () => window.clearTimeout(timer);
-  }, [deletedFolderIds, deletedPartIds, firebaseReady, folderRecords, hasPendingSync, isBackendLoading, parts, syncRetryBlocked]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -943,8 +941,7 @@ export function App() {
       setDeletedPartIds([]);
       setDeletedFolderIds([]);
       saveWorkspaceCache(nextParts, nextFolders, false);
-      setHasPendingSync(false);
-      setSyncRetryBlocked(false);
+      setHasUnsavedChanges(false);
       setSelected(new Set());
       undoStackRef.current = [];
       setUndoCount(0);
@@ -977,10 +974,14 @@ export function App() {
     setFolderRecords(nextFolders);
     setDeletedPartIds(nextDeletedPartIds);
     setDeletedFolderIds(nextDeletedFolderIds);
-    setHasPendingSync(true);
-    setSyncRetryBlocked(false);
+    setHasUnsavedChanges(true);
     saveWorkspaceCache(nextParts, nextFolders, true, nextDeletedPartIds, nextDeletedFolderIds);
-    setBackendMessage(firebaseReady ? "Saved locally. Firebase sync pending." : "Saved locally. Firebase is not configured.");
+    scheduleImmediateBackendSave({
+      parts: nextParts,
+      folders: nextFolders,
+      deletedPartIds: nextDeletedPartIds,
+      deletedFolderIds: nextDeletedFolderIds
+    });
     return true;
   }
 
@@ -997,55 +998,71 @@ export function App() {
     setFolderRecords(snapshot.folders);
     setDeletedPartIds(snapshot.deletedPartIds);
     setDeletedFolderIds(snapshot.deletedFolderIds);
-    setHasPendingSync(true);
-    setSyncRetryBlocked(false);
+    setHasUnsavedChanges(true);
     setSelected(new Set());
     setLastSelectedPartId(null);
     setPreviewPartId((current) => (snapshot.parts.some((part) => part.id === current) ? current : null));
     saveWorkspaceCache(snapshot.parts, snapshot.folders, true, snapshot.deletedPartIds, snapshot.deletedFolderIds);
-    setBackendMessage(firebaseReady ? "Undid last action. Firebase sync pending." : "Undid last action locally. Firebase is not configured.");
+    scheduleImmediateBackendSave(snapshot, "Undo saved locally. Firebase is not configured.");
   }
 
-  async function syncToBackend() {
+  function scheduleImmediateBackendSave(snapshot: UndoSnapshot, unconfiguredMessage = "Saved locally. Firebase is not configured.") {
     if (!firebaseReady) {
-      setBackendMessage("Firebase is not configured.");
+      setBackendMessage(unconfiguredMessage);
+      return;
+    }
+
+    const saveVersion = backendSaveVersionRef.current + 1;
+    backendSaveVersionRef.current = saveVersion;
+    setIsBackendLoading(true);
+    setBackendMessage("Saving to Firebase...");
+
+    backendSaveQueueRef.current = backendSaveQueueRef.current
+      .catch(() => undefined)
+      .then(() => saveSnapshotToBackend(snapshot, saveVersion));
+  }
+
+  async function saveSnapshotToBackend(snapshot: UndoSnapshot, saveVersion: number) {
+    if (!firebaseReady) {
       return false;
     }
 
-    setIsBackendLoading(true);
-    setBackendMessage("Checking latest Firebase data before syncing...");
     try {
       const remoteWorkspace = await readWorkspaceFromFirebase();
       const reconciled = reconcileWorkspaceForSync(
-        parts,
+        snapshot.parts,
         remoteWorkspace.parts,
-        folderRecords,
+        snapshot.folders,
         remoteWorkspace.folders,
-        deletedPartIds,
-        deletedFolderIds
+        snapshot.deletedPartIds,
+        snapshot.deletedFolderIds
       );
 
-      setBackendMessage("Syncing local changes to Firebase...");
       await writeWorkspaceToFirebase(reconciled.parts, reconciled.folders);
-      setParts(reconciled.parts);
-      setFolderRecords(reconciled.folders);
-      setDeletedPartIds([]);
-      setDeletedFolderIds([]);
-      saveWorkspaceCache(reconciled.parts, reconciled.folders, false);
-      setHasPendingSync(false);
-      setSyncRetryBlocked(false);
-      setBackendMessage(
-        reconciled.renumberedCount
-          ? `Synced ${reconciled.parts.length} parts. Renumbered ${reconciled.renumberedCount} conflicting part(s).`
-          : `Synced ${reconciled.parts.length} parts to Firebase.`
-      );
+
+      if (saveVersion === backendSaveVersionRef.current) {
+        setParts(reconciled.parts);
+        setFolderRecords(reconciled.folders);
+        setDeletedPartIds([]);
+        setDeletedFolderIds([]);
+        saveWorkspaceCache(reconciled.parts, reconciled.folders, false);
+        setHasUnsavedChanges(false);
+        setBackendMessage(
+          reconciled.renumberedCount
+            ? `Saved to Firebase. Renumbered ${reconciled.renumberedCount} conflicting part(s).`
+            : "Saved to Firebase."
+        );
+      }
       return true;
     } catch (error) {
-      setSyncRetryBlocked(true);
-      setBackendMessage(error instanceof Error ? error.message : "Could not save to Firebase.");
+      if (saveVersion === backendSaveVersionRef.current) {
+        setHasUnsavedChanges(true);
+        saveWorkspaceCache(snapshot.parts, snapshot.folders, true, snapshot.deletedPartIds, snapshot.deletedFolderIds);
+        setBackendMessage(error instanceof Error ? error.message : "Could not save to Firebase.");
+      }
       return false;
     } finally {
-      setIsBackendLoading(false);
+      if (saveVersion === backendSaveVersionRef.current) setIsBackendLoading(false);
     }
   }
 
@@ -1894,8 +1911,8 @@ export function App() {
           <h1>Parts Library</h1>
         </div>
         <div className="hero-actions">
-          <div className="sync-summary">
-            <strong>{hasPendingSync ? "Unsynced" : isBackendLoading ? "Syncing" : "Synced"}</strong>
+          <div className="save-summary">
+            <strong>{isBackendLoading ? "Saving" : hasUnsavedChanges ? "Unsaved" : "Saved"}</strong>
             <span>{backendMessage}</span>
           </div>
           <button
@@ -1917,19 +1934,6 @@ export function App() {
           >
             <Undo2 size={16} />
             Undo
-          </button>
-          <button
-            className="button secondary"
-            disabled={isBackendLoading || !firebaseReady || !hasPendingSync}
-            type="button"
-            onClick={() => {
-              setSyncRetryBlocked(false);
-              void syncToBackend();
-            }}
-            title="Push local changes to Firebase"
-          >
-            <RefreshCw size={16} />
-            Sync Now
           </button>
           <label className="button secondary" title="Import CSV into Firebase-backed workspace">
             <Upload size={16} />

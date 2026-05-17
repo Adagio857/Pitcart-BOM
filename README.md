@@ -1,6 +1,6 @@
 # Parts Tracker
 
-A TypeScript/React parts library backed by Firebase Firestore. The app applies edits immediately in the browser, keeps a local cache as a fallback, and syncs to Firebase about every 30 seconds. Use **Sync Now** before closing if the status shows unsynced changes.
+A TypeScript/React parts library backed by Firebase Firestore and hosted on Firebase Hosting. The app applies edits immediately in the browser, keeps a local cache as a fallback, and saves each action to Firebase right away.
 
 The old Google Sheet / Apps Script backend has been replaced. `google-apps-script.gs` can be kept as a migration reference, but the app no longer calls it.
 
@@ -69,22 +69,9 @@ workspaces/{workspaceId}/attachmentChunks
 
 PDF BOM attachments are split into chunk documents in `attachmentChunks` and reassembled by the app for preview. This avoids the Firestore single-document size limit while staying within the free-tier style of setup.
 
-## GitHub Pages
-
-This project can still be hosted as a static GitHub Pages site.
-
-1. Push the project to GitHub.
-2. In GitHub, open **Settings > Secrets and variables > Actions > Variables**.
-3. Add the same `VITE_FIREBASE_*` values from `.env.local`.
-4. Open **Settings > Pages**.
-5. Set **Source** to **GitHub Actions**.
-6. Push to `main`, or run the **Deploy GitHub Pages** workflow manually.
-
-Firebase web config is safe to ship in a frontend app; Firestore security rules are what protect the database.
-
 ## Firebase Hosting
 
-Firebase Hosting also works on the free Spark plan.
+Firebase Hosting works on the free Spark plan. GitHub remains the source of code, but the public site is deployed to Firebase Hosting instead of GitHub Pages.
 
 1. Install the Firebase CLI:
 
@@ -108,8 +95,41 @@ firebase deploy --only hosting
 
 The included `firebase.json` serves the built `dist` folder and routes app URLs back to `index.html`.
 
+## GitHub Deploys To Firebase
+
+The repository includes `.github/workflows/deploy-firebase-hosting.yml`. On every push to `main`, GitHub Actions builds the app and deploys it to Firebase Hosting.
+
+In GitHub, go to **Settings > Secrets and variables > Actions**.
+
+Add these **Variables**:
+
+```txt
+VITE_FIREBASE_API_KEY
+VITE_FIREBASE_AUTH_DOMAIN
+VITE_FIREBASE_PROJECT_ID
+VITE_FIREBASE_STORAGE_BUCKET
+VITE_FIREBASE_MESSAGING_SENDER_ID
+VITE_FIREBASE_APP_ID
+VITE_FIREBASE_WORKSPACE_ID
+```
+
+Add this **Secret**:
+
+```txt
+FIREBASE_SERVICE_ACCOUNT
+```
+
+To create that secret:
+
+1. Firebase Console > Project settings > Service accounts.
+2. Click **Generate new private key**.
+3. Copy the entire JSON file contents.
+4. Paste it into the GitHub secret named `FIREBASE_SERVICE_ACCOUNT`.
+
+Firebase web config is safe to ship in a frontend app; Firestore security rules are what protect the database. Keep the service account JSON secret private.
+
 ## Notes
 
-Before each sync, the app reads the latest Firebase workspace and merges in parts other people added. If two users created the same generated production part number, the app renumbers the local conflicting part before writing.
+Before each save, the app reads the latest Firebase workspace and merges in parts other people added. If two users created the same generated production part number, the app renumbers the local conflicting part before writing.
 
 Folders behave like a file manager: create folders from the list toolbar, expand/collapse folders inline, drag parts into folders, nest folders, rename/unpack/delete folders from the right-click menu, and reorder by dragging.

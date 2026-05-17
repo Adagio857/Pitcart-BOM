@@ -106,7 +106,7 @@ h2 {
   gap: 8px;
 }
 
-.sync-summary {
+.save-summary {
   display: grid;
   gap: 2px;
   max-width: min(360px, 28vw);
@@ -121,12 +121,12 @@ h2 {
   line-height: 1.2;
 }
 
-.sync-summary strong {
+.save-summary strong {
   color: #edf6f3;
   font-size: var(--text-sm);
 }
 
-.sync-summary span {
+.save-summary span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1098,7 +1098,7 @@ td small {
     flex-wrap: wrap;
   }
 
-  .sync-summary {
+  .save-summary {
     max-width: none;
   }
 
