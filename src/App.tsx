@@ -92,7 +92,7 @@ type FolderContextMenu = {
 
 const WORKSPACE_CACHE_KEY = "parts-tracker.workspaceCache.v1";
 const SYNC_INTERVAL_MS = 30000;
-const SYNC_CHUNK_SIZE = 6000;
+const SYNC_CHUNK_SIZE = 1200;
 const SHARED_APPS_SCRIPT_URL =
   "https://script.google.com/macros/s/AKfycbwecDDPCzEjK5aEoZrKAD0g-ZvTubCrsaNjjhA-MXA1DcCQq4ey7jQgx5lVaDQPN4IP/exec";
 const DEFAULT_APPS_SCRIPT_URL = import.meta.env.VITE_APPS_SCRIPT_URL || SHARED_APPS_SCRIPT_URL;
