@@ -1046,11 +1046,12 @@ tbody tr.folder-list-row:hover::after {
   --tree-depth: 0;
   --tree-indent: 22px;
   --tree-control: 22px;
+  --tree-gap: 7px;
   position: relative;
   display: grid;
   grid-template-columns: calc(var(--tree-depth) * var(--tree-indent)) var(--tree-control) minmax(0, 1fr);
   align-items: center;
-  gap: 7px;
+  gap: var(--tree-gap);
   min-width: 0;
   width: 100%;
   height: 56px;
@@ -1063,9 +1064,21 @@ tbody td > .tree-cell {
 
 .tree-select-slot {
   display: grid;
+  grid-column: 2;
+  grid-row: 1;
   place-items: center;
   width: var(--tree-control);
   height: var(--tree-control);
+}
+
+.folder-expand-button {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.tree-cell > .part-name {
+  grid-column: 3;
+  grid-row: 1;
 }
 
 .tree-select-slot input[type="checkbox"] {
@@ -1078,55 +1091,27 @@ tbody td > .tree-cell {
 }
 
 .tree-guides {
-  position: relative;
-  align-self: stretch;
-  min-height: 56px;
-}
-
-.tree-guides::before {
   position: absolute;
-  inset: -1px 0 -1px 0;
-  width: calc((var(--tree-depth) - 1) * var(--tree-indent));
-  background-image: repeating-linear-gradient(
-    to right,
-    transparent 0,
-    transparent 10px,
-    rgba(144, 141, 142, 0.28) 10px,
-    rgba(144, 141, 142, 0.28) 11px,
-    transparent 11px,
-    transparent var(--tree-indent)
-  );
-  content: "";
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
 }
 
-.tree-guides::after {
+.tree-guide-svg {
   position: absolute;
-  top: -1px;
-  bottom: -1px;
-  left: calc((var(--tree-depth) * var(--tree-indent)) - 12px);
-  width: 32px;
-  background-image:
-    linear-gradient(rgba(144, 141, 142, 0.28), rgba(144, 141, 142, 0.28)),
-    linear-gradient(rgba(144, 141, 142, 0.28), rgba(144, 141, 142, 0.28));
-  background-position:
-    0 0,
-    0 50%;
-  background-repeat: no-repeat;
-  background-size:
-    1px 100%,
-    30px 1px;
-  content: "";
+  inset: 0 auto 0 0;
+  height: 56px;
+  overflow: visible;
 }
 
-.tree-last-entry .tree-guides::after {
-  background-size:
-    1px calc(50% + 1px),
-    30px 1px;
+.tree-guide-svg line {
+  stroke: rgba(144, 141, 142, 0.28);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
 }
 
-.tree-root-cell .tree-guides::before,
-.tree-root-cell .tree-guides::after {
-  display: none;
+.tree-guide-svg circle {
+  opacity: 0.78;
 }
 
 .folder-tree-cell {

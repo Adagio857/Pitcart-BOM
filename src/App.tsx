@@ -89,8 +89,8 @@ type PartDropIndicator = {
 };
 
 type ListEntry =
-  | { type: "folder"; folder: FolderRecord; depth: number; isLast: boolean }
-  | { type: "part"; part: Part; depth: number; isLast: boolean };
+  | { type: "folder"; folder: FolderRecord; depth: number; isLast: boolean; ancestorContinues: boolean[] }
+  | { type: "part"; part: Part; depth: number; isLast: boolean; ancestorContinues: boolean[] };
 
 type SortKey = "name" | "createdAt" | "type" | "folder" | "number" | "material" | "process" | "drawing" | "quantity" | "price" | "actions";
 
@@ -861,6 +861,82 @@ function stableSort<T>(items: T[], compare: (first: T, second: T) => number) {
     .map(({ item }) => item);
 }
 
+function TreeGuideLines({
+  ancestorContinues,
+  continuesToChildren,
+  depth,
+  isLast
+}: {
+  ancestorContinues: boolean[];
+  continuesToChildren?: boolean;
+  depth: number;
+  isLast: boolean;
+}) {
+  if (depth === 0 && !continuesToChildren) return null;
+
+  const indent = 22;
+  const control = 22;
+  const gap = 7;
+  const rowHeight = 56;
+  const midY = rowHeight / 2;
+  const lineColor = "rgba(0, 0, 0, 0.28)";
+  const controlCenter = (level: number) => level * indent + gap + control / 2;
+  const ownControlLeft = depth * indent + gap;
+  const parentX = depth > 0 ? controlCenter(depth - 1) : controlCenter(0);
+  const width = Math.max(controlCenter(depth) + control + gap, parentX + control + gap);
+  const points: Array<{ x: number; y: number }> = [];
+
+  function addPoint(x: number, y: number) {
+    if (!points.some((point) => point.x === x && point.y === y)) points.push({ x, y });
+  }
+
+  ancestorContinues.forEach((continues, level) => {
+    if (!continues || level >= depth - 1) return;
+    const x = controlCenter(level);
+    addPoint(x, 0);
+    addPoint(x, rowHeight);
+  });
+
+  if (depth > 0) {
+    addPoint(parentX, 0);
+    addPoint(parentX, midY);
+    addPoint(ownControlLeft, midY);
+    if (!isLast) addPoint(parentX, rowHeight);
+  }
+
+  if (continuesToChildren) {
+    const x = controlCenter(depth);
+    addPoint(x, midY);
+    addPoint(x, rowHeight);
+  }
+
+  return (
+    <svg
+      aria-hidden="true"
+      className="tree-guide-svg"
+      focusable="false"
+      preserveAspectRatio="none"
+      viewBox={`0 0 ${width} ${rowHeight}`}
+    >
+      {ancestorContinues.map((continues, level) => {
+        if (!continues || level >= depth - 1) return null;
+        const x = controlCenter(level);
+        return <line key={`ancestor-${level}`} x1={x} x2={x} y1={0} y2={rowHeight} />;
+      })}
+      {depth > 0 && (
+        <>
+          <line x1={parentX} x2={parentX} y1={0} y2={isLast ? midY : rowHeight} />
+          <line x1={parentX} x2={ownControlLeft} y1={midY} y2={midY} />
+        </>
+      )}
+      {continuesToChildren && <line x1={controlCenter(depth)} x2={controlCenter(depth)} y1={midY} y2={rowHeight} />}
+      {points.map((point) => (
+        <circle cx={point.x} cy={point.y} key={`${point.x}-${point.y}`} r="1.35" style={{ fill: lineColor }} />
+      ))}
+    </svg>
+  );
+}
+
 function partToForm(part: Part): PartForm {
   return {
     ...part,
@@ -1208,19 +1284,21 @@ export function App() {
       partsByFolder.set(folderId, [...(partsByFolder.get(folderId) || []), part]);
     });
 
-    function appendFolderContents(parentId: string, depth: number) {
+    function appendFolderContents(parentId: string, depth: number, ancestorContinues: boolean[] = []) {
       const childFolders = stableSort(foldersByParent.get(parentId) || [], (first, second) => compareValues(first.name, second.name));
       const childParts = stableSort(partsByFolder.get(parentId) || [], (first, second) => compareValues(first.name, second.name));
       const childCount = childFolders.length + childParts.length;
       let childIndex = 0;
 
       childFolders.forEach((folder) => {
-        entries.push({ type: "folder", folder, depth, isLast: childIndex === childCount - 1 });
+        const isLast = childIndex === childCount - 1;
+        entries.push({ type: "folder", folder, depth, isLast, ancestorContinues });
         childIndex += 1;
-        appendFolderContents(folder.id, depth + 1);
+        appendFolderContents(folder.id, depth + 1, [...ancestorContinues, !isLast]);
       });
       childParts.forEach((part) => {
-        entries.push({ type: "part", part, depth, isLast: childIndex === childCount - 1 });
+        const isLast = childIndex === childCount - 1;
+        entries.push({ type: "part", part, depth, isLast, ancestorContinues });
         childIndex += 1;
       });
     }
@@ -1243,19 +1321,21 @@ export function App() {
       partsByFolder.set(folderId, [...(partsByFolder.get(folderId) || []), part]);
     });
 
-    function appendFolderContents(parentId: string, depth: number) {
+    function appendFolderContents(parentId: string, depth: number, ancestorContinues: boolean[] = []) {
       const childFolders = foldersByParent.get(parentId) || [];
       const childParts = sortState ? stableSort(partsByFolder.get(parentId) || [], compareParts) : partsByFolder.get(parentId) || [];
       const childCount = childFolders.length + childParts.length;
       let childIndex = 0;
 
       childFolders.forEach((folder) => {
-        entries.push({ type: "folder", folder, depth, isLast: childIndex === childCount - 1 });
+        const isLast = childIndex === childCount - 1;
+        entries.push({ type: "folder", folder, depth, isLast, ancestorContinues });
         childIndex += 1;
-        if (expandedFolders.has(folder.id)) appendFolderContents(folder.id, depth + 1);
+        if (expandedFolders.has(folder.id)) appendFolderContents(folder.id, depth + 1, [...ancestorContinues, !isLast]);
       });
       childParts.forEach((part) => {
-        entries.push({ type: "part", part, depth, isLast: childIndex === childCount - 1 });
+        const isLast = childIndex === childCount - 1;
+        entries.push({ type: "part", part, depth, isLast, ancestorContinues });
         childIndex += 1;
       });
     }
@@ -2485,7 +2565,7 @@ export function App() {
               <tbody>
                 {listEntries.map((entry) => {
                   if (entry.type === "folder") {
-                    const { folder, depth, isLast } = entry;
+                    const { ancestorContinues, folder, depth, isLast } = entry;
                   const dropPosition = folderDropIndicator?.path === folder.id ? folderDropIndicator.position : null;
                   const isExpanded = expandedFolders.has(folder.id);
                   const hasChildren =
@@ -2520,11 +2600,19 @@ export function App() {
                             "tree-cell",
                             "folder-tree-cell",
                             depth === 0 ? "tree-root-cell" : "",
+                            isExpanded && hasChildren ? "tree-expanded-entry" : "",
                             isLast ? "tree-last-entry" : ""
                           ].filter(Boolean).join(" ")}
                           style={{ "--tree-depth": depth } as CSSProperties}
                         >
-                          <span className="tree-guides" aria-hidden="true" />
+                          <span className="tree-guides" aria-hidden="true">
+                            <TreeGuideLines
+                              ancestorContinues={ancestorContinues}
+                              continuesToChildren={isExpanded && hasChildren}
+                              depth={depth}
+                              isLast={isLast}
+                            />
+                          </span>
                           <button
                             className="icon-button folder-expand-button"
                             disabled={!hasChildren}
@@ -2547,7 +2635,7 @@ export function App() {
                   );
                   }
 
-                  const { part, depth, isLast } = entry;
+                  const { ancestorContinues, part, depth, isLast } = entry;
                   const partDropPosition = partDropIndicator?.id === part.id ? partDropIndicator.position : null;
                   return (
                   <tr
@@ -2590,7 +2678,9 @@ export function App() {
                         ].filter(Boolean).join(" ")}
                         style={{ "--tree-depth": depth } as CSSProperties}
                       >
-                        <span className="tree-guides" aria-hidden="true" />
+                        <span className="tree-guides" aria-hidden="true">
+                          <TreeGuideLines ancestorContinues={ancestorContinues} depth={depth} isLast={isLast} />
+                        </span>
                         <span className="tree-select-slot">
                           <input
                             aria-label={`Select ${part.name}`}
