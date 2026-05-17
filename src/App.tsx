@@ -1,11 +1,14 @@
 import {
   ArrowDownToLine,
+  Check,
   Database,
   ExternalLink,
   FileJson,
   Filter,
   Folder,
+  LoaderCircle,
   PackagePlus,
+  Pencil,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -49,6 +52,7 @@ type Part = {
   attachmentFileName: string;
   attachmentMimeType: string;
   attachmentDataUrl: string;
+  createdAt: string;
 };
 
 type FolderRecord = {
@@ -56,6 +60,7 @@ type FolderRecord = {
   name: string;
   parentId: string;
   itemKind: ItemKind;
+  createdAt: string;
 };
 
 type LegacyPart = Omit<Partial<Part>, "processes"> & {
@@ -65,7 +70,7 @@ type LegacyPart = Omit<Partial<Part>, "processes"> & {
   status?: ProcessStatus;
 };
 
-type PartForm = Omit<Part, "id" | "quantity" | "unitPrice" | "discountPercent"> & {
+type PartForm = Omit<Part, "id" | "quantity" | "unitPrice" | "discountPercent" | "createdAt"> & {
   quantity: string;
   unitPrice: string;
   discountPercent: string;
@@ -86,6 +91,13 @@ type PartDropIndicator = {
 type ListEntry =
   | { type: "folder"; folder: FolderRecord; depth: number; isLast: boolean }
   | { type: "part"; part: Part; depth: number; isLast: boolean };
+
+type SortKey = "name" | "createdAt" | "type" | "folder" | "number" | "material" | "process" | "drawing" | "quantity" | "price" | "actions";
+
+type SortState = {
+  key: SortKey;
+  direction: "asc" | "desc";
+} | null;
 
 type FolderContextMenu = {
   folderId: string;
@@ -166,7 +178,8 @@ const csvHeaders = [
   "itemKind",
   "linkedBomId",
   "attachmentFileName",
-  "attachmentMimeType"
+  "attachmentMimeType",
+  "createdAt"
 ] as const;
 
 function normalizePart(part: LegacyPart): Part {
@@ -204,7 +217,8 @@ function normalizePart(part: LegacyPart): Part {
     linkedBomId: part.linkedBomId || "",
     attachmentFileName: part.attachmentFileName || "",
     attachmentMimeType: part.attachmentMimeType || "",
-    attachmentDataUrl: part.attachmentDataUrl || ""
+    attachmentDataUrl: part.attachmentDataUrl || "",
+    createdAt: String(part.createdAt || "")
   };
 }
 
@@ -313,7 +327,8 @@ function normalizeFolders(rawFolders: LegacyFolder[], rawParts: LegacyPart[] = [
       id: record.id,
       name: record.name.trim() || "Untitled folder",
       parentId: record.parentId || "",
-      itemKind: parseItemKind(record.itemKind)
+      itemKind: parseItemKind(record.itemKind),
+      createdAt: String(record.createdAt || "")
     };
     folderById.set(normalizedRecord.id, normalizedRecord);
     records.push(normalizedRecord);
@@ -335,7 +350,7 @@ function normalizeFolders(rawFolders: LegacyFolder[], rawParts: LegacyPart[] = [
       }
 
       const id = legacyFolderId(currentPath, itemKind);
-      parentId = addRecord({ id, name: piece, parentId, itemKind });
+      parentId = addRecord({ id, name: piece, parentId, itemKind, createdAt: "" });
       idByPath.set(pathKey, id);
     });
 
@@ -355,7 +370,8 @@ function normalizeFolders(rawFolders: LegacyFolder[], rawParts: LegacyPart[] = [
         id,
         name,
         parentId: String(folder.parentId || "").trim(),
-        itemKind: parseItemKind(folder.itemKind)
+        itemKind: parseItemKind(folder.itemKind),
+        createdAt: String(folder.createdAt || "")
       });
     }
   });
@@ -826,6 +842,25 @@ function getBomLineCost(part: Part) {
   return part.quantity * part.unitPrice * discountMultiplier;
 }
 
+function formatCreatedDate(value: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+function compareValues(first: string | number, second: string | number) {
+  if (typeof first === "number" && typeof second === "number") return first - second;
+  return String(first).localeCompare(String(second), undefined, { numeric: true, sensitivity: "base" });
+}
+
+function stableSort<T>(items: T[], compare: (first: T, second: T) => number) {
+  return items
+    .map((item, index) => ({ item, index }))
+    .sort((first, second) => compare(first.item, second.item) || first.index - second.index)
+    .map(({ item }) => item);
+}
+
 function partToForm(part: Part): PartForm {
   return {
     ...part,
@@ -839,6 +874,7 @@ function formToPart(form: PartForm, id: string = crypto.randomUUID()): Part {
   return {
     ...form,
     id,
+    createdAt: new Date().toISOString(),
     partNumber: form.partNumber.trim(),
     originalPartNumber: form.originalPartNumber.trim(),
     folder: form.folder,
@@ -881,6 +917,8 @@ export function App() {
   const [processFilter, setProcessFilter] = useState("All");
   const [processDraft, setProcessDraft] = useState<ProcessStep>({ name: "", status: "Not Started" });
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [sortState, setSortState] = useState<SortState>(null);
+  const [isBomSelectorOpen, setIsBomSelectorOpen] = useState(false);
   const [draggingFolder, setDraggingFolder] = useState<string | null>(null);
   const [draggingPartId, setDraggingPartId] = useState<string | null>(null);
   const [dragPosition, setDragPosition] = useState({ x: 0, y: 0 });
@@ -1089,7 +1127,42 @@ export function App() {
     () => getRelevantFolders(folders, sectionItems, activeSection),
     [activeSection, folders, sectionItems]
   );
-  const tableColumnCount = activeSection === "production" ? 8 : 7;
+  const tableColumnCount = activeSection === "production" ? 9 : 8;
+  const selectedBomItem = bomItems.find((item) => item.id === form.linkedBomId) || null;
+
+  function partSortValue(part: Part, key: SortKey) {
+    const linkedBom = bomItems.find((item) => item.id === part.linkedBomId);
+    switch (key) {
+      case "createdAt":
+        return part.createdAt || "";
+      case "type":
+        return part.itemKind === "bom" ? part.thickness || part.material || "BOM item" : "Production item";
+      case "folder":
+        return part.folder ? getFolderDisplayPath(part.folder, folders) : "Root";
+      case "number":
+        return part.partNumber;
+      case "material":
+        return part.itemKind === "bom" ? `${part.material} ${part.thickness}` : linkedBom?.name || "";
+      case "process":
+        return serializeProcesses(part.processes);
+      case "drawing":
+        return part.drawingUrl || part.material || part.attachmentFileName;
+      case "quantity":
+        return part.quantity;
+      case "price":
+        return getBomLineCost(part);
+      case "actions":
+        return part.name;
+      default:
+        return part.name;
+    }
+  }
+
+  function compareParts(first: Part, second: Part) {
+    if (!sortState) return 0;
+    const multiplier = sortState.direction === "asc" ? 1 : -1;
+    return compareValues(partSortValue(first, sortState.key), partSortValue(second, sortState.key)) * multiplier;
+  }
 
   useEffect(() => {
     setSelected(new Set());
@@ -1119,6 +1192,43 @@ export function App() {
       return statusMatches && processMatches && queryMatches;
     });
   }, [activeSection, folders, parts, processFilter, query, statusFilter]);
+
+  const bomTreeEntries = useMemo(() => {
+    const entries: ListEntry[] = [];
+    const bomFolders = getRelevantFolders(folders, bomItems, "bom");
+    const foldersByParent = new Map<string, FolderRecord[]>();
+    const partsByFolder = new Map<string, Part[]>();
+
+    bomFolders.forEach((folder) => {
+      const parentId = folder.parentId || "";
+      foldersByParent.set(parentId, [...(foldersByParent.get(parentId) || []), folder]);
+    });
+    bomItems.forEach((part) => {
+      const folderId = part.folder || "";
+      partsByFolder.set(folderId, [...(partsByFolder.get(folderId) || []), part]);
+    });
+
+    function appendFolderContents(parentId: string, depth: number) {
+      const childFolders = stableSort(foldersByParent.get(parentId) || [], (first, second) => compareValues(first.name, second.name));
+      const childParts = stableSort(partsByFolder.get(parentId) || [], (first, second) => compareValues(first.name, second.name));
+      const childCount = childFolders.length + childParts.length;
+      let childIndex = 0;
+
+      childFolders.forEach((folder) => {
+        entries.push({ type: "folder", folder, depth, isLast: childIndex === childCount - 1 });
+        childIndex += 1;
+        appendFolderContents(folder.id, depth + 1);
+      });
+      childParts.forEach((part) => {
+        entries.push({ type: "part", part, depth, isLast: childIndex === childCount - 1 });
+        childIndex += 1;
+      });
+    }
+
+    appendFolderContents("", 0);
+    return entries;
+  }, [bomItems, folders]);
+
   const listEntries = useMemo(() => {
     const entries: ListEntry[] = [];
     const foldersByParent = new Map<string, FolderRecord[]>();
@@ -1135,7 +1245,7 @@ export function App() {
 
     function appendFolderContents(parentId: string, depth: number) {
       const childFolders = foldersByParent.get(parentId) || [];
-      const childParts = partsByFolder.get(parentId) || [];
+      const childParts = sortState ? stableSort(partsByFolder.get(parentId) || [], compareParts) : partsByFolder.get(parentId) || [];
       const childCount = childFolders.length + childParts.length;
       let childIndex = 0;
 
@@ -1152,15 +1262,13 @@ export function App() {
 
     appendFolderContents("", 0);
     return entries;
-  }, [activeFolders, expandedFolders, filteredParts]);
+  }, [activeFolders, expandedFolders, filteredParts, sortState]);
   const visibleParts = useMemo(
     () => listEntries.filter((entry): entry is Extract<ListEntry, { type: "part" }> => entry.type === "part").map((entry) => entry.part),
     [listEntries]
   );
 
   const totalValue = bomItems.reduce((sum, part) => sum + getBomLineCost(part), 0);
-  const lowStockCount = bomItems.filter((part) => part.quantity <= 2).length;
-  const blockedCount = productionItems.filter((part) => part.processes.some((process) => process.status === "Blocked")).length;
   const previewPart = parts.find((part) => part.id === previewPartId) ?? null;
   const previewSourceUrl =
     previewPart?.itemKind === "production"
@@ -1222,7 +1330,7 @@ export function App() {
     const parentId = parent === "All" ? "" : parent;
     let activeParentId = parentId;
     const newFolders = splitFolderPath(draft).map((name) => {
-      const folder = { id: makeFolderId(), name, parentId: activeParentId, itemKind: activeSection };
+      const folder = { id: makeFolderId(), name, parentId: activeParentId, itemKind: activeSection, createdAt: new Date().toISOString() };
       activeParentId = folder.id;
       return folder;
     });
@@ -1581,6 +1689,9 @@ export function App() {
       },
       editingId ?? undefined
     );
+    if (editingId) {
+      nextPart.createdAt = parts.find((part) => part.id === editingId)?.createdAt || nextPart.createdAt;
+    }
     if (nextPart.itemKind === "production" && nextPart.processes.length === 0) {
       nextPart.processes = [{ name: "Unassigned", status: "Not Started" }];
     }
@@ -1649,10 +1760,6 @@ export function App() {
       )
     ].join("\n");
     saveFile("parts-tracker.csv", csv, "text/csv;charset=utf-8");
-  }
-
-  function downloadJson() {
-    saveFile("parts-tracker-backup.json", JSON.stringify(parts, null, 2), "application/json");
   }
 
   function addBomSourceItem(sourceUrl: string, sourceType: "cart" | "pdf", label?: string) {
@@ -1728,7 +1835,7 @@ export function App() {
           parentId = currentId;
           return;
         }
-        const folder = { id: makeFolderId(), name, parentId, itemKind: activeSection };
+        const folder = { id: makeFolderId(), name, parentId, itemKind: activeSection, createdAt: new Date().toISOString() };
         importedFolders.push(folder);
         importedPathToId.set(currentPath, folder.id);
         parentId = folder.id;
@@ -1851,8 +1958,36 @@ export function App() {
     });
   }
 
+  function updateSort(key: SortKey) {
+    setSortState((current) => {
+      if (!current || current.key !== key) return { key, direction: "asc" };
+      return { key, direction: current.direction === "asc" ? "desc" : "asc" };
+    });
+  }
+
+  function renderSortHeader(label: string, key: SortKey) {
+    const isActive = sortState?.key === key;
+    return (
+      <button
+        className={["sort-header", isActive ? "active" : ""].filter(Boolean).join(" ")}
+        type="button"
+        onClick={() => updateSort(key)}
+        title={`Sort by ${label}`}
+      >
+        <span>{label}</span>
+        <span aria-hidden="true">{isActive ? (sortState.direction === "asc" ? "^" : "v") : ""}</span>
+      </button>
+    );
+  }
+
   return (
-    <main className="app-shell" onClick={closeFolderContextMenu}>
+    <main
+      className="app-shell"
+      onClick={() => {
+        closeFolderContextMenu();
+        setIsBomSelectorOpen(false);
+      }}
+    >
       {draggingFolder && (
         <div className="folder-drag-ghost" style={{ left: dragPosition.x + 12, top: dragPosition.y + 12 }}>
           <Folder size={15} />
@@ -1911,9 +2046,12 @@ export function App() {
           <h1>Parts Library</h1>
         </div>
         <div className="hero-actions">
-          <div className="save-summary">
-            <strong>{isBackendLoading ? "Saving" : hasUnsavedChanges ? "Unsaved" : "Saved"}</strong>
-            <span>{backendMessage}</span>
+          <div
+            className={["save-indicator", isBackendLoading ? "saving" : hasUnsavedChanges ? "unsaved" : "saved"].join(" ")}
+            title={backendMessage}
+            aria-label={isBackendLoading ? "Saving changes" : hasUnsavedChanges ? "Unsaved changes" : "Saved"}
+          >
+            {isBackendLoading || hasUnsavedChanges ? <LoaderCircle size={17} /> : <Check size={17} />}
           </div>
           <button
             className="button secondary"
@@ -1940,43 +2078,11 @@ export function App() {
             Import CSV
             <input type="file" accept=".csv,text/csv" onChange={importCsv} />
           </label>
-          <button className="button secondary" type="button" onClick={addCartLinkBomItem} title="Add one BOM item for a cart or checkout link">
-            <ExternalLink size={16} />
-            Cart Link
-          </button>
-          <label className="button secondary" title="Add one BOM item for a checkout PDF">
-            <Upload size={16} />
-            PDF Item
-            <input type="file" accept="application/pdf,.pdf" onChange={addPdfBomItem} />
-          </label>
-          <button className="button secondary" type="button" onClick={downloadJson} title="Download local backup">
-            <FileJson size={16} />
-            JSON
-          </button>
           <button className="button primary" type="button" onClick={downloadCsv} title="Export CSV backup">
             <ArrowDownToLine size={16} />
             Download CSV
           </button>
         </div>
-      </section>
-
-      <section className="stats-grid">
-        <article>
-          <span>BOM Items</span>
-          <strong>{bomItems.length}</strong>
-        </article>
-        <article>
-          <span>Inventory Value</span>
-          <strong>${totalValue.toFixed(2)}</strong>
-        </article>
-        <article>
-          <span>Low Stock</span>
-          <strong>{lowStockCount}</strong>
-        </article>
-        <article>
-          <span>Blocked Production</span>
-          <strong>{blockedCount}</strong>
-        </article>
       </section>
 
       <section className="section-tabs" aria-label="Workspace section">
@@ -2121,14 +2227,57 @@ export function App() {
               <>
                 <label className="span-two">
                   Linked BOM item
-                  <select value={form.linkedBomId} onChange={(event) => updateForm("linkedBomId", event.target.value)}>
-                    <option value="">No linked BOM item</option>
-                    {bomItems.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.name}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="compact-tree-select" onClick={(event) => event.stopPropagation()}>
+                    <button
+                      className="compact-tree-trigger"
+                      type="button"
+                      onClick={() => setIsBomSelectorOpen((current) => !current)}
+                    >
+                      <span>{selectedBomItem?.name || "No linked BOM item"}</span>
+                      <span aria-hidden="true">v</span>
+                    </button>
+                    {isBomSelectorOpen && (
+                      <div className="compact-tree-menu">
+                        <button
+                          className={!form.linkedBomId ? "selected" : ""}
+                          type="button"
+                          onClick={() => {
+                            updateForm("linkedBomId", "");
+                            setIsBomSelectorOpen(false);
+                          }}
+                        >
+                          No linked BOM item
+                        </button>
+                        {bomTreeEntries.map((entry) =>
+                          entry.type === "folder" ? (
+                            <div
+                              className="compact-tree-folder"
+                              key={entry.folder.id}
+                              style={{ "--tree-depth": entry.depth } as CSSProperties}
+                              title={entry.folder.name}
+                            >
+                              <Folder size={13} />
+                              <span>{entry.folder.name}</span>
+                            </div>
+                          ) : (
+                            <button
+                              className={form.linkedBomId === entry.part.id ? "selected" : ""}
+                              key={entry.part.id}
+                              style={{ "--tree-depth": entry.depth } as CSSProperties}
+                              type="button"
+                              title={entry.part.name}
+                              onClick={() => {
+                                updateForm("linkedBomId", entry.part.id);
+                                setIsBomSelectorOpen(false);
+                              }}
+                            >
+                              <span>{entry.part.name}</span>
+                            </button>
+                          )
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </label>
                 <label className="span-two">
                   Onshape drawing link
@@ -2209,6 +2358,20 @@ export function App() {
             {editingId ? <Database size={16} /> : <PackagePlus size={16} />}
             {editingId ? "Save Item" : activeSection === "bom" ? "Add BOM Item" : "Add Production Item"}
           </button>
+
+          {activeSection === "bom" && (
+            <div className="bom-source-actions" aria-label="BOM source actions">
+              <button className="button secondary" type="button" onClick={addCartLinkBomItem} title="Add one BOM item for a cart or checkout link">
+                <ExternalLink size={16} />
+                Cart Link
+              </button>
+              <label className="button secondary" title="Add one BOM item for a checkout PDF">
+                <Upload size={16} />
+                PDF Item
+                <input type="file" accept="application/pdf,.pdf" onChange={addPdfBomItem} />
+              </label>
+            </div>
+          )}
         </form>
 
         <div
@@ -2250,12 +2413,18 @@ export function App() {
 
           <div className="table-heading">
             <div className="list-heading">
-              <span>
-                {activeSection === "bom" ? "Bill of Materials" : "Production Tracker"} ({listEntries.length} visible item(s))
+              <span className="heading-metric">
+                <span className="list-title">
+                  {activeSection === "bom" ? "Bill of Materials" : "Production Tracker"}
+                </span>
+                <small>{sectionItems.length} total item(s)</small>
               </span>
-              <small>{sectionItems.length} total item(s)</small>
+              <span className="heading-metric">
+                <span className="list-title">Inventory Value</span>
+                <small>${totalValue.toFixed(2)}</small>
+              </span>
             </div>
-            <div>
+            <div className="table-actions">
               <button className="ghost" type="button" onClick={() => void createFolder()}>
                 <Plus size={14} />
                 New folder
@@ -2293,22 +2462,24 @@ export function App() {
                     <col className="col-price" />
                   </>
                 )}
+                <col className="col-created" />
                 <col className="col-actions" />
               </colgroup>
               <thead>
                 <tr>
-                  <th colSpan={2}>Name</th>
-                  <th>Folder</th>
-                  {activeSection === "production" && <th>Part #</th>}
-                  {activeSection === "bom" ? <th>Material / Stock</th> : <th>Linked BOM Item</th>}
-                  {activeSection === "production" && <th>Processes</th>}
-                  {activeSection === "production" ? <th>Drawing</th> : (
+                  <th className="cell-name" colSpan={2}>{renderSortHeader("Name", "name")}</th>
+                  <th className="cell-folder">{renderSortHeader("Folder", "folder")}</th>
+                  {activeSection === "production" && <th className="cell-part-number">{renderSortHeader("Part #", "number")}</th>}
+                  {activeSection === "bom" ? <th className="cell-material">{renderSortHeader("Material / Stock", "material")}</th> : <th className="cell-material">{renderSortHeader("Linked BOM Item", "material")}</th>}
+                  {activeSection === "production" && <th className="cell-processes">{renderSortHeader("Processes", "process")}</th>}
+                  {activeSection === "production" ? <th className="cell-drawing">{renderSortHeader("Drawing", "drawing")}</th> : (
                     <>
-                      <th>Qty</th>
-                      <th>Price</th>
+                      <th className="cell-qty">{renderSortHeader("Qty", "quantity")}</th>
+                      <th className="cell-price">{renderSortHeader("Price", "price")}</th>
                     </>
                   )}
-                  <th>Actions</th>
+                  <th className="cell-created">{renderSortHeader("Created", "createdAt")}</th>
+                  <th className="cell-actions">{renderSortHeader("Actions", "actions")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -2343,7 +2514,7 @@ export function App() {
                       onDrop={(event) => handleFolderDrop(event, folder.id, draggingFolder ? getFolderDropPosition(event) : "inside")}
                       onDragEnd={clearDragState}
                     >
-                      <td colSpan={2}>
+                      <td className="cell-name" colSpan={2}>
                         <div
                           className={[
                             "tree-cell",
@@ -2353,9 +2524,7 @@ export function App() {
                           ].filter(Boolean).join(" ")}
                           style={{ "--tree-depth": depth } as CSSProperties}
                         >
-                          <span className="tree-guides" aria-hidden="true">
-                            <span className="tree-end-mask" />
-                          </span>
+                          <span className="tree-guides" aria-hidden="true" />
                           <button
                             className="icon-button folder-expand-button"
                             disabled={!hasChildren}
@@ -2373,7 +2542,7 @@ export function App() {
                           </button>
                         </div>
                       </td>
-                      <td colSpan={tableColumnCount - 2}></td>
+                      <td className="folder-fill-cell" colSpan={tableColumnCount - 2}></td>
                     </tr>
                   );
                   }
@@ -2412,7 +2581,7 @@ export function App() {
                     onDrop={(event) => handlePartDrop(event, part.id)}
                     onDragEnd={clearDragState}
                   >
-                    <td colSpan={2}>
+                    <td className="cell-name" colSpan={2}>
                       <div
                         className={[
                           "tree-cell",
@@ -2421,9 +2590,7 @@ export function App() {
                         ].filter(Boolean).join(" ")}
                         style={{ "--tree-depth": depth } as CSSProperties}
                       >
-                        <span className="tree-guides" aria-hidden="true">
-                          <span className="tree-end-mask" />
-                        </span>
+                        <span className="tree-guides" aria-hidden="true" />
                         <span className="tree-select-slot">
                           <input
                             aria-label={`Select ${part.name}`}
@@ -2465,11 +2632,11 @@ export function App() {
                         </div>
                       </div>
                     </td>
-                    <td title={part.folder ? getFolderDisplayPath(part.folder, folders) || "Unknown folder" : "Root"}>
+                    <td className="cell-folder" title={part.folder ? getFolderDisplayPath(part.folder, folders) || "Unknown folder" : "Root"}>
                       {part.folder ? getFolderDisplayPath(part.folder, folders) || "Unknown folder" : "Root"}
                     </td>
-                    {activeSection === "production" && <td>{part.partNumber}</td>}
-                    <td>
+                    {activeSection === "production" && <td className="cell-part-number">{part.partNumber}</td>}
+                    <td className="cell-material">
                       {activeSection === "bom" ? (
                         <>
                           <div title={part.attachmentFileName || part.material}>
@@ -2491,7 +2658,7 @@ export function App() {
                       )}
                     </td>
                     {activeSection === "production" && (
-                      <td>
+                      <td className="cell-processes">
                         <div className="process-chips">
                           {part.processes.map((process) => (
                             <span
@@ -2505,18 +2672,23 @@ export function App() {
                       </td>
                     )}
                     {activeSection === "production" ? (
-                      <td>{part.drawingUrl ? renderLinkedValue(part.drawingUrl, "Open") : "Missing"}</td>
+                      <td className="cell-drawing">{part.drawingUrl ? renderLinkedValue(part.drawingUrl, "Open") : "Missing"}</td>
                     ) : (
                       <>
-                        <td>{part.quantity}</td>
-                        <td title={part.discountPercent ? `${part.discountPercent}% discount applied` : "No discount"}>
+                        <td className="cell-qty">{part.quantity}</td>
+                        <td className="cell-price" title={part.discountPercent ? `${part.discountPercent}% discount applied` : "No discount"}>
                           ${getBomLineCost(part).toFixed(2)}
                         </td>
                       </>
                     )}
-                    <td>
+                    <td className="cell-created" title={part.createdAt ? new Date(part.createdAt).toLocaleString() : "No created date"}>
+                      {formatCreatedDate(part.createdAt) || "-"}
+                    </td>
+                    <td className="cell-actions">
                       <div className="row-actions">
-                        <button type="button" onClick={() => editPart(part)}>Edit</button>
+                        <button type="button" onClick={() => editPart(part)} title="Edit part">
+                          <Pencil size={14} />
+                        </button>
                         <button className="danger" type="button" onClick={() => deletePart(part.id)} title="Delete part">
                           <Trash2 size={14} />
                         </button>
