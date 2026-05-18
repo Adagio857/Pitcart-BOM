@@ -23,6 +23,7 @@ import {
 import { ChangeEvent, CSSProperties, DragEvent, FormEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { initializeApp, type FirebaseApp } from "firebase/app";
 import { collection, doc, getDocs, getFirestore, serverTimestamp, writeBatch, type Firestore, type WriteBatch } from "firebase/firestore";
+import { APP_USERS } from "./app-users";
 
 type ProcessStatus = "Not Started" | "Queued" | "In Progress" | "Done" | "Blocked" | "Outsourced";
 
@@ -117,9 +118,6 @@ type UndoSnapshot = {
 const WORKSPACE_CACHE_KEY = "parts-tracker.workspaceCache.v1";
 const LOGIN_CACHE_KEY = "parts-tracker.login.v1";
 const MAX_UNDO_STEPS = 30;
-const APP_USERS = [
-  { username: "HudsonM", password: "1648" }
-] as const;
 const FIREBASE_WORKSPACE_ID = import.meta.env.VITE_FIREBASE_WORKSPACE_ID || "parts-tracker";
 const FIREBASE_ATTACHMENT_CHUNK_SIZE = 700_000;
 const firebaseConfig = {
