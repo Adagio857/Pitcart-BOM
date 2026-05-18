@@ -39,9 +39,11 @@ VITE_FIREBASE_WORKSPACE_ID=parts-tracker
 ```
 
 4. In Firebase, create a **Cloud Firestore** database.
-5. Start in production mode, then add rules appropriate for your team.
+5. Start Firestore in production mode, then add rules appropriate for your team.
 
-For a private-ish team tool without login, you can temporarily use broad rules while testing:
+The app uses a lightweight team login screen. Usernames follow `FirstnameLastInitial`, for example `HudsonM`, and the shared password is `1648`.
+
+Because this is not Firebase Authentication, use broad Firestore rules for this simple setup:
 
 ```txt
 rules_version = '2';
@@ -54,7 +56,7 @@ service cloud.firestore {
 }
 ```
 
-Those rules mean anyone who can load the site and knows the Firebase config can read/write the data. For a real team deployment, add Firebase Auth and restrict writes to signed-in users.
+This keeps the page from casual use, but it is not high-security. Anyone with the Firebase project config could still access the database directly unless you later switch back to Firebase Authentication rules.
 
 ## Firestore Data
 

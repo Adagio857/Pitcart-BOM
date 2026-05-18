@@ -110,6 +110,60 @@ h2 {
   order: 10;
 }
 
+.auth-shell {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 28px 12px;
+}
+
+.auth-card {
+  display: grid;
+  gap: 16px;
+  width: min(100%, 460px);
+  padding: 24px;
+  border: 1px solid rgba(154, 150, 150, 0.18);
+  border-radius: 8px;
+  background: rgba(25, 24, 24, 0.9);
+  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.3);
+}
+
+.auth-card h1 {
+  margin-bottom: 10px;
+}
+
+.auth-copy {
+  margin: 0;
+  color: #a9a4a4;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.auth-mark {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  border: 1px solid rgba(154, 150, 150, 0.2);
+  border-radius: 8px;
+  background: rgba(10, 10, 11, 0.72);
+  color: #f1eeee;
+}
+
+.auth-error {
+  padding: 10px 12px;
+  border: 1px solid rgba(216, 90, 112, 0.36);
+  border-radius: 6px;
+  background: rgba(142, 31, 46, 0.12);
+  color: #ff8ea0;
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+.spin-icon {
+  animation: spin 0.9s linear infinite;
+}
+
 .save-indicator {
   display: grid;
   place-items: center;

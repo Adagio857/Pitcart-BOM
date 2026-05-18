@@ -6,6 +6,8 @@ import {
   FileJson,
   Filter,
   Folder,
+  Lock,
+  LogOut,
   LoaderCircle,
   PackagePlus,
   Pencil,
@@ -113,7 +115,9 @@ type UndoSnapshot = {
 };
 
 const WORKSPACE_CACHE_KEY = "parts-tracker.workspaceCache.v1";
+const LOGIN_CACHE_KEY = "parts-tracker.login.v1";
 const MAX_UNDO_STEPS = 30;
+const TEAM_SHARED_PASSWORD = "1648";
 const FIREBASE_WORKSPACE_ID = import.meta.env.VITE_FIREBASE_WORKSPACE_ID || "parts-tracker";
 const FIREBASE_ATTACHMENT_CHUNK_SIZE = 700_000;
 const firebaseConfig = {
@@ -424,6 +428,19 @@ function loadWorkspaceCache(): {
   }
 }
 
+function isValidTeamUsername(username: string) {
+  return /^[A-Z][A-Za-z]*[A-Z]$/.test(username.trim());
+}
+
+function loadLoginSession() {
+  const username = localStorage.getItem(LOGIN_CACHE_KEY) || "";
+  return isValidTeamUsername(username) ? username : "";
+}
+
+function saveLoginSession(username: string) {
+  localStorage.setItem(LOGIN_CACHE_KEY, username);
+}
+
 function saveWorkspaceCache(
   parts: Part[],
   folders: FolderRecord[],
@@ -446,12 +463,16 @@ function hasFirebaseConfig() {
   return Boolean(firebaseConfig.apiKey && firebaseConfig.projectId && firebaseConfig.appId);
 }
 
-function getFirebaseDatabase() {
+function getFirebaseApp() {
   if (!hasFirebaseConfig()) {
     throw new Error("Firebase is not configured. Add the VITE_FIREBASE_* values to your environment.");
   }
   if (!firebaseApp) firebaseApp = initializeApp(firebaseConfig);
-  if (!firebaseDb) firebaseDb = getFirestore(firebaseApp);
+  return firebaseApp;
+}
+
+function getFirebaseDatabase() {
+  if (!firebaseDb) firebaseDb = getFirestore(getFirebaseApp());
   return firebaseDb;
 }
 
@@ -974,6 +995,11 @@ export function App() {
   const [form, setForm] = useState<PartForm>(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
   const firebaseReady = hasFirebaseConfig();
+  const [authUser, setAuthUser] = useState(loadLoginSession);
+  const [authUsername, setAuthUsername] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [isAuthLoading, setIsAuthLoading] = useState(false);
   const [isBackendLoading, setIsBackendLoading] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(cachedWorkspace.dirty);
   const [deletedPartIds, setDeletedPartIds] = useState<string[]>(cachedWorkspace.deletedPartIds);
@@ -1010,7 +1036,11 @@ export function App() {
   const [undoCount, setUndoCount] = useState(0);
 
   useEffect(() => {
-    if (!firebaseReady) return;
+    if (!authUser) setBackendMessage("Sign in to load the Firebase workspace.");
+  }, [authUser]);
+
+  useEffect(() => {
+    if (!firebaseReady || !authUser) return;
     if (cachedWorkspace.dirty) {
       scheduleImmediateBackendSave({
         parts,
@@ -1021,7 +1051,7 @@ export function App() {
       return;
     }
     void refreshFromBackend();
-  }, [firebaseReady]);
+  }, [firebaseReady, authUser]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -1037,10 +1067,60 @@ export function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [firebaseReady]);
 
+  function handleLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!firebaseReady) {
+      setAuthError("Firebase is not configured. Add the VITE_FIREBASE_* values before using the app.");
+      return;
+    }
+
+    setIsAuthLoading(true);
+    setAuthError("");
+    const username = authUsername.trim();
+    if (!isValidTeamUsername(username)) {
+      setAuthError("Use your assigned username.");
+      setIsAuthLoading(false);
+      return;
+    }
+    if (authPassword !== TEAM_SHARED_PASSWORD) {
+      setAuthError("Incorrect password.");
+      setIsAuthLoading(false);
+      return;
+    }
+
+    saveLoginSession(username);
+    setAuthUser(username);
+    setAuthPassword("");
+    setBackendMessage(`Signed in as ${username}. Loading workspace...`);
+    setIsAuthLoading(false);
+  }
+
+  function handleLogout() {
+    setParts([]);
+    setFolderRecords([]);
+    setSelected(new Set());
+    setLastSelectedPartId(null);
+    setPreviewPartId(null);
+    setDeletedPartIds([]);
+    setDeletedFolderIds([]);
+    setHasUnsavedChanges(false);
+    undoStackRef.current = [];
+    setUndoCount(0);
+    localStorage.removeItem(LOGIN_CACHE_KEY);
+    localStorage.removeItem(WORKSPACE_CACHE_KEY);
+    setAuthUser("");
+    setAuthUsername("");
+    setBackendMessage("Signed out.");
+  }
+
   async function refreshFromBackend() {
     if (!firebaseReady) {
       setBackendMessage("Firebase is not configured.");
       setParts([]);
+      return;
+    }
+    if (!authUser) {
+      setBackendMessage("Sign in to load the Firebase workspace.");
       return;
     }
 
@@ -1125,6 +1205,10 @@ export function App() {
       setBackendMessage(unconfiguredMessage);
       return;
     }
+    if (!authUser) {
+      setBackendMessage("Saved locally. Sign in to save to Firebase.");
+      return;
+    }
 
     const saveVersion = backendSaveVersionRef.current + 1;
     backendSaveVersionRef.current = saveVersion;
@@ -1137,7 +1221,7 @@ export function App() {
   }
 
   async function saveSnapshotToBackend(snapshot: UndoSnapshot, saveVersion: number) {
-    if (!firebaseReady) {
+    if (!firebaseReady || !authUser) {
       return false;
     }
 
@@ -2060,6 +2144,60 @@ export function App() {
     );
   }
 
+  if (!firebaseReady || !authUser) {
+    return (
+      <main className="auth-shell">
+        <form className="auth-card" onSubmit={handleLogin}>
+          <div className="auth-mark" aria-hidden="true">
+            <Lock size={22} />
+          </div>
+          <div>
+            <p className="eyebrow">Firebase workspace</p>
+            <h1>Parts Library</h1>
+            <p className="auth-copy">
+              {firebaseReady
+                ? "Sign in to view or change the production workspace."
+                : "Firebase is not configured yet. Add the VITE_FIREBASE_* values before using the app."}
+            </p>
+          </div>
+
+          <label>
+            Username
+            <input
+              autoComplete="username"
+              disabled={!firebaseReady || isAuthLoading}
+              placeholder="Username"
+              type="text"
+              value={authUsername}
+              onChange={(event) => setAuthUsername(event.target.value)}
+            />
+          </label>
+          <label>
+            Password
+            <input
+              autoComplete="current-password"
+              disabled={!firebaseReady || isAuthLoading}
+              type="password"
+              value={authPassword}
+              onChange={(event) => setAuthPassword(event.target.value)}
+            />
+          </label>
+
+          {authError && <div className="auth-error">{authError}</div>}
+
+          <button
+            className="button primary wide"
+            disabled={!firebaseReady || isAuthLoading}
+            type="submit"
+          >
+            {isAuthLoading ? <LoaderCircle className="spin-icon" size={16} /> : <Lock size={16} />}
+            Sign in
+          </button>
+        </form>
+      </main>
+    );
+  }
+
   return (
     <main
       className="app-shell"
@@ -2152,6 +2290,15 @@ export function App() {
           >
             <Undo2 size={16} />
             Undo
+          </button>
+          <button
+            className="button secondary"
+            type="button"
+            onClick={handleLogout}
+            title={`Signed in as ${authUser}`}
+          >
+            <LogOut size={16} />
+            Sign out
           </button>
           <label className="button secondary" title="Import CSV into Firebase-backed workspace">
             <Upload size={16} />
