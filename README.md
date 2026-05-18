@@ -41,7 +41,15 @@ VITE_FIREBASE_WORKSPACE_ID=parts-tracker
 4. In Firebase, create a **Cloud Firestore** database.
 5. Start Firestore in production mode, then add rules appropriate for your team.
 
-The app uses a lightweight team login screen. Usernames follow `FirstnameLastInitial`, for example `HudsonM`, and the shared password is `1648`.
+The app uses a lightweight team login screen backed by an approved username/password list in `src/App.tsx`.
+To add a user, edit `APP_USERS` near the top of the file:
+
+```ts
+const APP_USERS = [
+  { username: "HudsonM", password: "1648" },
+  { username: "NewUser", password: "new-password" }
+] as const;
+```
 
 Because this is not Firebase Authentication, use broad Firestore rules for this simple setup:
 

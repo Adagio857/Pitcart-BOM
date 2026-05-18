@@ -117,7 +117,9 @@ type UndoSnapshot = {
 const WORKSPACE_CACHE_KEY = "parts-tracker.workspaceCache.v1";
 const LOGIN_CACHE_KEY = "parts-tracker.login.v1";
 const MAX_UNDO_STEPS = 30;
-const TEAM_SHARED_PASSWORD = "1648";
+const APP_USERS = [
+  { username: "HudsonM", password: "1648" }
+] as const;
 const FIREBASE_WORKSPACE_ID = import.meta.env.VITE_FIREBASE_WORKSPACE_ID || "parts-tracker";
 const FIREBASE_ATTACHMENT_CHUNK_SIZE = 700_000;
 const firebaseConfig = {
@@ -429,7 +431,7 @@ function loadWorkspaceCache(): {
 }
 
 function isValidTeamUsername(username: string) {
-  return /^[A-Z][A-Za-z]*[A-Z]$/.test(username.trim());
+  return APP_USERS.some((user) => user.username === username.trim());
 }
 
 function loadLoginSession() {
@@ -439,6 +441,10 @@ function loadLoginSession() {
 
 function saveLoginSession(username: string) {
   localStorage.setItem(LOGIN_CACHE_KEY, username);
+}
+
+function isValidLogin(username: string, password: string) {
+  return APP_USERS.some((user) => user.username === username.trim() && user.password === password);
 }
 
 function saveWorkspaceCache(
@@ -1077,13 +1083,8 @@ export function App() {
     setIsAuthLoading(true);
     setAuthError("");
     const username = authUsername.trim();
-    if (!isValidTeamUsername(username)) {
-      setAuthError("Use your assigned username.");
-      setIsAuthLoading(false);
-      return;
-    }
-    if (authPassword !== TEAM_SHARED_PASSWORD) {
-      setAuthError("Incorrect password.");
+    if (!isValidLogin(username, authPassword)) {
+      setAuthError("Incorrect username or password.");
       setIsAuthLoading(false);
       return;
     }
