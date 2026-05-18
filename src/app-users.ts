@@ -27,7 +27,6 @@ export const APP_USERS = [
   { username: "EmmaS", password: "1648" },
   { username: "EricK", password: "1648" },
   { username: "ErikB", password: "1648" },
-  { username: "erika0474", password: "1648" },
   { username: "EsanE", password: "1648" },
   { username: "EthanB", password: "1648" },
   { username: "EvanR", password: "1648" },

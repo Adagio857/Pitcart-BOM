@@ -1008,6 +1008,10 @@ export function App() {
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(cachedWorkspace.dirty);
   const [deletedPartIds, setDeletedPartIds] = useState<string[]>(cachedWorkspace.deletedPartIds);
   const [deletedFolderIds, setDeletedFolderIds] = useState<string[]>(cachedWorkspace.deletedFolderIds);
+  const partsRef = useRef(parts);
+  const folderRecordsRef = useRef(folderRecords);
+  const deletedPartIdsRef = useRef(deletedPartIds);
+  const deletedFolderIdsRef = useRef(deletedFolderIds);
   const [backendMessage, setBackendMessage] = useState(
     cachedWorkspace.parts.length
       ? cachedWorkspace.dirty
@@ -1038,6 +1042,22 @@ export function App() {
   const [lastSelectedPartId, setLastSelectedPartId] = useState<string | null>(null);
   const [panelWidths, setPanelWidths] = useState({ editor: 380 });
   const [undoCount, setUndoCount] = useState(0);
+
+  useEffect(() => {
+    partsRef.current = parts;
+  }, [parts]);
+
+  useEffect(() => {
+    folderRecordsRef.current = folderRecords;
+  }, [folderRecords]);
+
+  useEffect(() => {
+    deletedPartIdsRef.current = deletedPartIds;
+  }, [deletedPartIds]);
+
+  useEffect(() => {
+    deletedFolderIdsRef.current = deletedFolderIds;
+  }, [deletedFolderIds]);
 
   useEffect(() => {
     if (!authUser) setBackendMessage("Sign in to load the Firebase workspace.");
@@ -1095,6 +1115,10 @@ export function App() {
   }
 
   function handleLogout() {
+    partsRef.current = [];
+    folderRecordsRef.current = [];
+    deletedPartIdsRef.current = [];
+    deletedFolderIdsRef.current = [];
     setParts([]);
     setFolderRecords([]);
     setSelected(new Set());
@@ -1129,6 +1153,10 @@ export function App() {
       const workspace = await readWorkspaceFromFirebase();
       const nextParts = workspace.parts;
       const nextFolders = workspace.folders;
+      partsRef.current = nextParts;
+      folderRecordsRef.current = nextFolders;
+      deletedPartIdsRef.current = [];
+      deletedFolderIdsRef.current = [];
       setParts(nextParts);
       setFolderRecords(nextFolders);
       setDeletedPartIds([]);
@@ -1149,20 +1177,29 @@ export function App() {
 
   function persist(
     nextParts: Part[],
-    nextFolders = folderRecords,
-    nextDeletedPartIds = deletedPartIds,
-    nextDeletedFolderIds = deletedFolderIds
+    nextFolders = folderRecordsRef.current,
+    nextDeletedPartIds = deletedPartIdsRef.current,
+    nextDeletedFolderIds = deletedFolderIdsRef.current
   ) {
+    const currentParts = partsRef.current;
+    const currentFolders = folderRecordsRef.current;
+    const currentDeletedPartIds = deletedPartIdsRef.current;
+    const currentDeletedFolderIds = deletedFolderIdsRef.current;
+
     undoStackRef.current = [
       ...undoStackRef.current.slice(-(MAX_UNDO_STEPS - 1)),
       {
-        parts,
-        folders: folderRecords,
-        deletedPartIds,
-        deletedFolderIds
+        parts: currentParts,
+        folders: currentFolders,
+        deletedPartIds: currentDeletedPartIds,
+        deletedFolderIds: currentDeletedFolderIds
       }
     ];
     setUndoCount(undoStackRef.current.length);
+    partsRef.current = nextParts;
+    folderRecordsRef.current = nextFolders;
+    deletedPartIdsRef.current = nextDeletedPartIds;
+    deletedFolderIdsRef.current = nextDeletedFolderIds;
     setParts(nextParts);
     setFolderRecords(nextFolders);
     setDeletedPartIds(nextDeletedPartIds);
@@ -1187,6 +1224,10 @@ export function App() {
 
     undoStackRef.current = undoStackRef.current.slice(0, -1);
     setUndoCount(undoStackRef.current.length);
+    partsRef.current = snapshot.parts;
+    folderRecordsRef.current = snapshot.folders;
+    deletedPartIdsRef.current = snapshot.deletedPartIds;
+    deletedFolderIdsRef.current = snapshot.deletedFolderIds;
     setParts(snapshot.parts);
     setFolderRecords(snapshot.folders);
     setDeletedPartIds(snapshot.deletedPartIds);
@@ -1242,6 +1283,10 @@ export function App() {
         setFolderRecords(reconciled.folders);
         setDeletedPartIds([]);
         setDeletedFolderIds([]);
+        partsRef.current = reconciled.parts;
+        folderRecordsRef.current = reconciled.folders;
+        deletedPartIdsRef.current = [];
+        deletedFolderIdsRef.current = [];
         saveWorkspaceCache(reconciled.parts, reconciled.folders, false);
         setHasUnsavedChanges(false);
         setBackendMessage(
@@ -1491,6 +1536,8 @@ export function App() {
     const draft = normalizeFolderPath(folderName || "");
     if (!draft) return;
     const parentId = parent === "All" ? "" : parent;
+    const currentParts = partsRef.current;
+    const currentFolders = uniqueFoldersById(folderRecordsRef.current);
     let activeParentId = parentId;
     const newFolders = splitFolderPath(draft).map((name) => {
       const folder = { id: makeFolderId(), name, parentId: activeParentId, itemKind: activeSection, createdAt: new Date().toISOString() };
@@ -1498,35 +1545,39 @@ export function App() {
       return folder;
     });
     if (newFolders.length === 0) return;
-    const nextFolders = [...folders, ...newFolders];
+    const nextFolders = [...currentFolders, ...newFolders];
     setExpandedFolders((current) => {
       const next = new Set(current);
       if (parentId) next.add(parentId);
       newFolders.slice(0, -1).forEach((folder) => next.add(folder.id));
       return next;
     });
-    persist(parts, nextFolders);
+    persist(currentParts, nextFolders);
   }
 
   async function removeFolder(folderId: string) {
-    const folder = folders.find((candidate) => candidate.id === folderId);
+    const currentParts = partsRef.current;
+    const currentFolders = uniqueFoldersById(folderRecordsRef.current);
+    const currentDeletedFolderIds = deletedFolderIdsRef.current;
+    const currentDeletedPartIds = deletedPartIdsRef.current;
+    const folder = currentFolders.find((candidate) => candidate.id === folderId);
     if (!folder) return;
-    const parent = getParentFolder(folderId, folders);
+    const parent = getParentFolder(folderId, currentFolders);
     const parentId = parent === "All" ? "" : parent;
-    const affectedFolderIds = getFolderDescendantIds(folderId, folders);
+    const affectedFolderIds = getFolderDescendantIds(folderId, currentFolders);
     affectedFolderIds.add(folderId);
-    const affectedParts = parts.filter((part) => affectedFolderIds.has(part.folder));
+    const affectedParts = currentParts.filter((part) => affectedFolderIds.has(part.folder));
 
     const confirmed = window.confirm(
       `Delete "${folder.name}" and its nested folders? ${affectedParts.length} affected part(s) will move to the parent folder.`
     );
     if (!confirmed) return;
 
-    const nextParts = parts.map((part) => (affectedFolderIds.has(part.folder) ? { ...part, folder: parentId } : part));
-    const nextFolders = folders.filter((candidate) => !affectedFolderIds.has(candidate.id));
-    const nextDeletedFolderIds = Array.from(new Set([...deletedFolderIds, ...affectedFolderIds]));
+    const nextParts = currentParts.map((part) => (affectedFolderIds.has(part.folder) ? { ...part, folder: parentId } : part));
+    const nextFolders = currentFolders.filter((candidate) => !affectedFolderIds.has(candidate.id));
+    const nextDeletedFolderIds = Array.from(new Set([...currentDeletedFolderIds, ...affectedFolderIds]));
 
-    persist(nextParts, nextFolders, deletedPartIds, nextDeletedFolderIds);
+    persist(nextParts, nextFolders, currentDeletedPartIds, nextDeletedFolderIds);
     setExpandedFolders((current) => {
       const next = new Set(current);
       affectedFolderIds.forEach((id) => next.delete(id));
@@ -1535,13 +1586,15 @@ export function App() {
   }
 
   async function moveFolder(folderId: string, targetParent: string) {
+    const currentParts = partsRef.current;
+    const currentFolders = uniqueFoldersById(folderRecordsRef.current);
     const parentId = targetParent === "All" ? "" : targetParent;
-    const descendantIds = getFolderDescendantIds(folderId, folders);
+    const descendantIds = getFolderDescendantIds(folderId, currentFolders);
     if (folderId === parentId || descendantIds.has(parentId)) return;
 
-    const movingGroup = getFolderGroup(folderId, folders);
+    const movingGroup = getFolderGroup(folderId, currentFolders);
     const movingSet = new Set(movingGroup.map((folder) => folder.id));
-    const foldersWithoutMoved = folders.filter((folder) => !movingSet.has(folder.id));
+    const foldersWithoutMoved = currentFolders.filter((folder) => !movingSet.has(folder.id));
     const parentGroup = parentId ? getFolderGroup(parentId, foldersWithoutMoved) : [];
     const parentIndex = parentId ? foldersWithoutMoved.findIndex((folder) => folder.id === parentId) : -1;
     const insertIndex = parentId && parentIndex >= 0 ? parentIndex + parentGroup.length : foldersWithoutMoved.length;
@@ -1551,7 +1604,7 @@ export function App() {
       ...movedGroup,
       ...foldersWithoutMoved.slice(insertIndex)
     ]);
-    persist(parts, nextFolders);
+    persist(currentParts, nextFolders);
     setExpandedFolders((current) => {
       const next = new Set(current);
       if (parentId) next.add(parentId);
@@ -1565,14 +1618,16 @@ export function App() {
       return;
     }
 
-    const targetFolder = folders.find((folder) => folder.id === targetFolderId);
+    const currentParts = partsRef.current;
+    const currentFolders = uniqueFoldersById(folderRecordsRef.current);
+    const targetFolder = currentFolders.find((folder) => folder.id === targetFolderId);
     if (!targetFolder) return;
-    const descendantIds = getFolderDescendantIds(folderId, folders);
+    const descendantIds = getFolderDescendantIds(folderId, currentFolders);
     if (folderId === targetFolderId || descendantIds.has(targetFolderId)) return;
 
-    const movingGroup = getFolderGroup(folderId, folders);
+    const movingGroup = getFolderGroup(folderId, currentFolders);
     const movingSet = new Set(movingGroup.map((folder) => folder.id));
-    const foldersWithoutMoved = folders.filter((folder) => !movingSet.has(folder.id));
+    const foldersWithoutMoved = currentFolders.filter((folder) => !movingSet.has(folder.id));
     const targetGroup = getFolderGroup(targetFolderId, foldersWithoutMoved);
     const targetIndex = foldersWithoutMoved.findIndex((folder) => folder.id === targetFolderId);
     const insertIndex = position === "before" ? targetIndex : targetIndex + targetGroup.length;
@@ -1586,18 +1641,22 @@ export function App() {
       ...movedGroup,
       ...foldersWithoutMoved.slice(insertIndex)
     ]);
-    persist(parts, nextFolders);
+    persist(currentParts, nextFolders);
   }
 
   async function movePartToFolder(partId: string, folderId: string) {
-    const nextParts = parts.map((part) => (part.id === partId ? { ...part, folder: folderId } : part));
-    persist(nextParts, folders);
+    const currentParts = partsRef.current;
+    const currentFolders = uniqueFoldersById(folderRecordsRef.current);
+    const nextParts = currentParts.map((part) => (part.id === partId ? { ...part, folder: folderId } : part));
+    persist(nextParts, currentFolders);
   }
 
   async function movePartsToFolder(partIds: string[], folderId: string) {
+    const currentParts = partsRef.current;
+    const currentFolders = uniqueFoldersById(folderRecordsRef.current);
     const movingIds = new Set(partIds);
-    const nextParts = parts.map((part) => (movingIds.has(part.id) ? { ...part, folder: folderId } : part));
-    persist(nextParts, folders);
+    const nextParts = currentParts.map((part) => (movingIds.has(part.id) ? { ...part, folder: folderId } : part));
+    persist(nextParts, currentFolders);
   }
 
   function movePartToPosition(partId: string, targetPartId: string, position: "before" | "after") {
@@ -1605,16 +1664,18 @@ export function App() {
   }
 
   function movePartsToPosition(partIds: string[], targetPartId: string, position: "before" | "after") {
+    const currentParts = partsRef.current;
+    const currentFolders = uniqueFoldersById(folderRecordsRef.current);
     const movingIds = new Set(partIds);
     if (movingIds.has(targetPartId)) return;
 
-    const targetPart = parts.find((part) => part.id === targetPartId);
+    const targetPart = currentParts.find((part) => part.id === targetPartId);
     if (!targetPart) return;
 
-    const movingParts = parts.filter((part) => movingIds.has(part.id)).map((part) => ({ ...part, folder: targetPart.folder || "" }));
+    const movingParts = currentParts.filter((part) => movingIds.has(part.id)).map((part) => ({ ...part, folder: targetPart.folder || "" }));
     if (movingParts.length === 0) return;
 
-    const partsWithoutMovingParts = parts.filter((part) => !movingIds.has(part.id));
+    const partsWithoutMovingParts = currentParts.filter((part) => !movingIds.has(part.id));
     const targetIndex = partsWithoutMovingParts.findIndex((part) => part.id === targetPartId);
     if (targetIndex < 0) return;
 
@@ -1624,34 +1685,40 @@ export function App() {
       ...movingParts,
       ...partsWithoutMovingParts.slice(insertIndex)
     ];
-    persist(nextParts, folders);
+    persist(nextParts, currentFolders);
   }
 
   async function renameFolder(folderId: string) {
-    const folder = folders.find((candidate) => candidate.id === folderId);
+    const currentParts = partsRef.current;
+    const currentFolders = uniqueFoldersById(folderRecordsRef.current);
+    const folder = currentFolders.find((candidate) => candidate.id === folderId);
     if (!folder) return;
     const nextName = window.prompt("Rename folder", folder.name)?.trim();
     if (!nextName) return;
     if (nextName === folder.name) return;
-    const nextFolders = folders.map((candidate) => candidate.id === folderId ? { ...candidate, name: nextName } : candidate);
-    persist(parts, nextFolders);
+    const nextFolders = currentFolders.map((candidate) => candidate.id === folderId ? { ...candidate, name: nextName } : candidate);
+    persist(currentParts, nextFolders);
   }
 
   async function unpackFolder(folderId: string) {
-    const folder = folders.find((candidate) => candidate.id === folderId);
+    const currentParts = partsRef.current;
+    const currentFolders = uniqueFoldersById(folderRecordsRef.current);
+    const currentDeletedPartIds = deletedPartIdsRef.current;
+    const currentDeletedFolderIds = deletedFolderIdsRef.current;
+    const folder = currentFolders.find((candidate) => candidate.id === folderId);
     if (!folder) return;
-    const parent = getParentFolder(folderId, folders);
+    const parent = getParentFolder(folderId, currentFolders);
     const parentId = parent === "All" ? "" : parent;
 
     const confirmed = window.confirm(`Unpack "${folder.name}" into its parent folder?`);
     if (!confirmed) return;
 
-    const nextParts = parts.map((part) => (part.folder === folderId ? { ...part, folder: parentId } : part));
-    const nextFolders = folders
+    const nextParts = currentParts.map((part) => (part.folder === folderId ? { ...part, folder: parentId } : part));
+    const nextFolders = currentFolders
       .filter((candidate) => candidate.id !== folderId)
       .map((candidate) => candidate.parentId === folderId ? { ...candidate, parentId } : candidate);
-    const nextDeletedFolderIds = Array.from(new Set([...deletedFolderIds, folderId]));
-    persist(nextParts, nextFolders, deletedPartIds, nextDeletedFolderIds);
+    const nextDeletedFolderIds = Array.from(new Set([...currentDeletedFolderIds, folderId]));
+    persist(nextParts, nextFolders, currentDeletedPartIds, nextDeletedFolderIds);
     setExpandedFolders((current) => {
       const next = new Set(current);
       next.delete(folderId);
@@ -1838,6 +1905,7 @@ export function App() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const currentParts = partsRef.current;
     const nextItemKind = editingId ? form.itemKind : activeSection;
     const generatedPartNumber = editingId ? originalPartNumber : nextPartNumber;
     const nextPart = formToPart(
@@ -1853,7 +1921,7 @@ export function App() {
       editingId ?? undefined
     );
     if (editingId) {
-      nextPart.createdAt = parts.find((part) => part.id === editingId)?.createdAt || nextPart.createdAt;
+      nextPart.createdAt = currentParts.find((part) => part.id === editingId)?.createdAt || nextPart.createdAt;
     }
     if (nextPart.itemKind === "production" && nextPart.processes.length === 0) {
       nextPart.processes = [{ name: "Unassigned", status: "Not Started" }];
@@ -1866,8 +1934,8 @@ export function App() {
       nextPart.originalPartNumber = "";
     }
     const nextParts = editingId
-      ? parts.map((part) => (part.id === editingId ? nextPart : part))
-      : [nextPart, ...parts];
+      ? currentParts.map((part) => (part.id === editingId ? nextPart : part))
+      : [nextPart, ...currentParts];
 
     const saved = persist(nextParts);
     if (saved) {
@@ -1891,8 +1959,10 @@ export function App() {
   }
 
   async function deletePart(id: string) {
-    const nextDeletedPartIds = Array.from(new Set([...deletedPartIds, id]));
-    persist(parts.filter((part) => part.id !== id), folderRecords, nextDeletedPartIds);
+    const currentParts = partsRef.current;
+    const currentFolders = folderRecordsRef.current;
+    const nextDeletedPartIds = Array.from(new Set([...deletedPartIdsRef.current, id]));
+    persist(currentParts.filter((part) => part.id !== id), currentFolders, nextDeletedPartIds);
     if (previewPartId === id) setPreviewPartId(null);
     setSelected((current) => {
       const next = new Set(current);
@@ -1902,8 +1972,10 @@ export function App() {
   }
 
   async function deleteSelected() {
-    const nextDeletedPartIds = Array.from(new Set([...deletedPartIds, ...selected]));
-    persist(parts.filter((part) => !selected.has(part.id)), folderRecords, nextDeletedPartIds);
+    const currentParts = partsRef.current;
+    const currentFolders = folderRecordsRef.current;
+    const nextDeletedPartIds = Array.from(new Set([...deletedPartIdsRef.current, ...selected]));
+    persist(currentParts.filter((part) => !selected.has(part.id)), currentFolders, nextDeletedPartIds);
     if (previewPartId && selected.has(previewPartId)) setPreviewPartId(null);
     setSelected(new Set());
     setLastSelectedPartId(null);
