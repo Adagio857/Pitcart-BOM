@@ -761,9 +761,10 @@ function reconcileWorkspaceForSync(
     mergedParts.push(nextPart);
   });
 
+  const localFolderIds = new Set(localFolders.map((folder) => folder.id));
   const mergedFolders = uniqueFoldersById([
-    ...remoteFolders.filter((folder) => !deletedFolderIdSet.has(folder.id)),
-    ...localFolders
+    ...localFolders.filter((folder) => !deletedFolderIdSet.has(folder.id)),
+    ...remoteFolders.filter((folder) => !localFolderIds.has(folder.id) && !deletedFolderIdSet.has(folder.id))
   ]);
 
   return { parts: mergedParts, folders: mergedFolders, renumberedCount };
