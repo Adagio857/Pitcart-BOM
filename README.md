@@ -41,17 +41,9 @@ VITE_FIREBASE_WORKSPACE_ID=parts-tracker
 4. In Firebase, create a **Cloud Firestore** database.
 5. Start Firestore in production mode, then add rules appropriate for your team.
 
-The app uses a lightweight team login screen backed by an approved username/password list in `src/app-users.ts`.
-To add a user, edit `APP_USERS` in that file:
+The app opens directly to the workspace without a login. Firebase loads on startup and saves edits automatically when configured. Without Firebase configuration, the app keeps edits in the local browser cache.
 
-```ts
-const APP_USERS = [
-  { username: "HudsonM", password: "1648" },
-  { username: "NewUser", password: "new-password" }
-] as const;
-```
-
-Because this is not Firebase Authentication, use broad Firestore rules for this simple setup:
+This setup uses the following Firestore rules for shared workspace access:
 
 ```txt
 rules_version = '2';
@@ -64,7 +56,7 @@ service cloud.firestore {
 }
 ```
 
-This keeps the page from casual use, but it is not high-security. Anyone with the Firebase project config could still access the database directly unless you later switch back to Firebase Authentication rules.
+These rules allow anyone with the Firebase project config to access the workspace. Restrict access with Firebase Authentication rules if required in the future.
 
 ## Firestore Data
 
